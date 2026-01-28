@@ -13,9 +13,10 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.env"
-TEMPLATES_DIR="${SCRIPT_DIR}/manifests/templates"
-OUTPUT_DIR="${SCRIPT_DIR}/manifests"
+VPS_DIR="$(dirname "$SCRIPT_DIR")"
+CONFIG_FILE="${VPS_DIR}/config.env"
+TEMPLATES_DIR="${VPS_DIR}/manifests/templates"
+OUTPUT_DIR="${VPS_DIR}/manifests"
 
 # =============================================================================
 # Usage
@@ -42,7 +43,7 @@ load_config() {
         echo -e "${RED}Error: Configuration file not found: ${CONFIG_FILE}${NC}"
         echo ""
         echo -e "${YELLOW}Create it from the example:${NC}"
-        echo "  cp ${SCRIPT_DIR}/config.env.example ${CONFIG_FILE}"
+        echo "  cp ${VPS_DIR}/config.env.example ${CONFIG_FILE}"
         echo ""
         exit 1
     fi
