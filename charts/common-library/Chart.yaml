@@ -1,0 +1,22 @@
+apiVersion: v2
+name: common-library
+description: Common library chart for K3s stack services
+version: 1.0.0
+type: library
+
+# Library chart to provide reusable templates for all applications
+# Can be referenced by other repos via Git URL
+maintainers:
+    -   name: DevOps Team
+        email: devops@company.com
+
+keywords:
+    - kubernetes
+    - library
+    - common
+    - templates
+    - k3s
+
+home: https://gitlab.com/your-org/k3d-stack
+sources:
+    - https://gitlab.com/your-org/k3d-stack

@@ -1,0 +1,119 @@
+# =============================================================================
+# Prometheus Minimal Configuration for VPS (4-6GB RAM)
+# Optimized for low memory footprint
+# =============================================================================
+
+# Prometheus Server
+server:
+  # Resource limits
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+
+  # Persistent storage
+  persistentVolume:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+  # Retention settings (7 days to save disk space)
+  retention: "7d"
+  retentionSize: "4GB"
+
+  # Security context
+  securityContext:
+    runAsUser: 65534
+    runAsNonRoot: true
+    runAsGroup: 65534
+    fsGroup: 65534
+
+  # Global scrape configuration
+  global:
+    scrape_interval: 30s
+    evaluation_interval: 30s
+
+  # Extra scrape configs - auto-discover pods with prometheus annotations
+  extraScrapeConfigs: |
+    # Auto-discover application pods with prometheus.io annotations
+    - job_name: 'kubernetes-pods'
+      kubernetes_sd_configs:
+        - role: pod
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+          action: replace
+          target_label: __address__
+          regex: (.+);(.+)
+          replacement: $2:$1
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: pod
+    
+    # PostgreSQL Exporter
+    - job_name: 'postgresql'
+      static_configs:
+        - targets: ['postgresql-metrics.storage.svc.cluster.local:9187']
+          labels:
+            service: postgresql
+
+# Alertmanager (disabled to save resources - enable if needed)
+alertmanager:
+  enabled: false
+
+# Pushgateway (disabled to save resources)
+pushgateway:
+  enabled: false
+
+# Node Exporter (useful for VPS monitoring)
+nodeExporter:
+  enabled: true
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "25m"
+    limits:
+      memory: "64Mi"
+      cpu: "100m"
+
+# Kube State Metrics (useful but optional)
+kube-state-metrics:
+  enabled: true
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "25m"
+    limits:
+      memory: "64Mi"
+      cpu: "100m"
+
+# ConfigMap reload (for dynamic config updates)
+configmapReload:
+  prometheus:
+    enabled: true
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "10m"
+      limits:
+        memory: "32Mi"
+        cpu: "50m"
+
+# Service accounts
+serviceAccounts:
+  server:
+    create: true
+  nodeExporter:
+    create: true

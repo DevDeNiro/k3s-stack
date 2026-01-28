@@ -1,0 +1,119 @@
+# =============================================================================
+# Kubernetes Audit Policy
+# Logs API calls for security monitoring
+# =============================================================================
+# 
+# Log levels:
+#   - None: Don't log events
+#   - Metadata: Log request metadata (user, timestamp, resource, verb)
+#   - Request: Log metadata + request body
+#   - RequestResponse: Log metadata + request body + response body
+#
+# =============================================================================
+apiVersion: audit.k8s.io/v1
+kind: Policy
+
+# Don't log watch requests (too verbose)
+omitStages:
+  - "RequestReceived"
+
+rules:
+  # ===========================================
+  # High-priority: Log all secret access
+  # ===========================================
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ===========================================
+  # High-priority: Log authentication events
+  # ===========================================
+  - level: Metadata
+    users: ["system:anonymous"]
+    verbs: ["*"]
+
+  - level: Metadata
+    resources:
+      - group: "authentication.k8s.io"
+        resources: ["*"]
+
+  # ===========================================
+  # High-priority: Log RBAC changes
+  # ===========================================
+  - level: Metadata
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # ===========================================
+  # Medium-priority: Log namespace operations
+  # ===========================================
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["namespaces"]
+    verbs: ["create", "delete"]
+
+  # ===========================================
+  # Medium-priority: Log pod exec/attach (potential shell access)
+  # ===========================================
+  - level: Request
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+    verbs: ["create"]
+
+  # ===========================================
+  # Medium-priority: Log service account token requests
+  # ===========================================
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+
+  # ===========================================
+  # Low-priority: Log deployments/statefulsets changes
+  # ===========================================
+  - level: Metadata
+    resources:
+      - group: "apps"
+        resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # ===========================================
+  # Skip: Don't log read-only requests for common resources
+  # ===========================================
+  - level: None
+    resources:
+      - group: ""
+        resources: ["endpoints", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # ===========================================
+  # Skip: Don't log system components
+  # ===========================================
+  - level: None
+    users:
+      - "system:kube-scheduler"
+      - "system:kube-proxy"
+      - "system:kube-controller-manager"
+      - "system:serviceaccount:kube-system:*"
+
+  # ===========================================
+  # Skip: Don't log health checks
+  # ===========================================
+  - level: None
+    nonResourceURLs:
+      - "/healthz*"
+      - "/livez*"
+      - "/readyz*"
+      - "/metrics"
+
+  # ===========================================
+  # Default: Log metadata for everything else
+  # ===========================================
+  - level: Metadata

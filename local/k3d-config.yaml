@@ -1,0 +1,72 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+    name: dev-cluster
+
+servers: 1
+agents: 0
+
+kubeAPI:
+    hostIP: "127.0.0.1"
+    hostPort: "6443"
+
+image: rancher/k3s:latest
+
+ports:
+    # Ports for the LoadBalancer (Ingress)
+    -   port: 80:80
+        nodeFilters:
+            - loadbalancer
+    -   port: 443:443
+        nodeFilters:
+            - loadbalancer
+    # Ingress NodePort
+    -   port: 30000:30000
+        nodeFilters:
+            - server:0
+    -   port: 30080:30080
+        nodeFilters:
+            - server:0
+    -   port: 30443:30443
+        nodeFilters:
+            - server:0
+    # Kafka NodePort
+    -   port: 30092:30092
+        nodeFilters:
+            - server:0
+    # Schema Registry NodePort
+    -   port: 30081:30081
+        nodeFilters:
+            - server:0
+    # Redis
+    -   port: 30379:30379
+        nodeFilters:
+            - server:0
+    # PostgreSQL
+    -   port: 30432:30432
+        nodeFilters:
+            - server:0
+
+volumes:
+    -   volume: /tmp/k3d-storage:/var/lib/rancher/k3s/storage
+        nodeFilters:
+            - server:0
+
+options:
+    k3d:
+        wait: true
+        timeout: "300s"
+        disableLoadbalancer: false  # To start for Ingress
+        disableImageVolume: false
+    k3s:
+        extraArgs:
+            -   arg: --disable=traefik
+                nodeFilters:
+                    - server:*
+
+            -   arg: --tls-san=127.0.0.1
+                nodeFilters:
+                    - server:*
+    kubeconfig:
+        updateDefaultKubeconfig: true
+        switchCurrentContext: true

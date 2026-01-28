@@ -1,0 +1,113 @@
+controller:
+    name: controller
+    image:
+        repository: registry.k8s.io/ingress-nginx/controller
+        tag: "v1.9.4"
+        digest: ""
+        pullPolicy: IfNotPresent
+
+    dnsPolicy: ClusterFirst
+
+    # Required for use with CNI based kubernetes installations (such as ones set up by kubeadm)
+    hostNetwork: false
+
+    # Optionally change this to ClusterFirstWithHostNet in case you have 'hostNetwork: true'
+    # By default, while using host network, name resolution uses the host's DNS
+    #    dnsPolicy: ClusterFirst
+
+    # Bare-metal considerations via the host network
+    # By default, Kubernetes clusters do not have a public IP address assigned for load balancer
+    # Use hostPort if you do not have a load balancer and want to expose your service
+    # In a production environment, you should avoid exposing the ingress controller via hostPort
+    hostPort:
+        enabled: false  # Disabled for k3d environment
+        ports:
+            http: 80
+            https: 443
+
+    # Use NodePort instead for k3d
+    service:
+        type: NodePort
+        nodePorts:
+            http: 30080
+            https: 30443
+
+    publishService:
+        enabled: true
+
+    # Enable a prometheus-operator ServiceMonitor
+    metrics:
+        enabled: false  # Will be set by install script
+        serviceMonitor:
+            enabled: false  # Will be set by install script
+            namespace: monitoring
+
+    # Create a custom service account
+    serviceAccount:
+        create: true
+        name: "ingress-nginx"
+
+    # Reduced resources for local development
+    resources:
+        requests:
+            cpu: 50m
+            memory: 64Mi
+        limits:
+            cpu: 200m
+            memory: 256Mi
+
+    # Configure a health check for the readiness probe
+    livenessProbe:
+        httpGet:
+            path: /healthz
+            port: 10254
+            scheme: HTTP
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        successThreshold: 1
+        failureThreshold: 5  # Increased for slower startup
+
+    readinessProbe:
+        httpGet:
+            path: /healthz
+            port: 10254
+            scheme: HTTP
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        successThreshold: 1
+        failureThreshold: 5  # Increased for slower startup
+
+    # Custom Nginx configuration
+    config:
+        use-forwarded-headers: "true"
+        compute-full-forwarded-for: "true"
+        use-proxy-protocol: "false"
+        proxy-body-size: "50m"
+        client-header-buffer-size: "16k"
+        large-client-header-buffers: "4 16k"
+        # Disable SSL redirect by default for local development
+        ssl-redirect: "false"
+        force-ssl-redirect: "false"
+
+    # Admission webhooks can cause issues in k3d
+    admissionWebhooks:
+        enabled: false
+
+defaultBackend:
+    enabled: false  # Disabled for simplicity
+    name: defaultbackend
+
+    image:
+        repository: registry.k8s.io/defaultbackend-amd64
+        tag: "1.5"
+        pullPolicy: IfNotPresent
+
+    resources:
+        limits:
+            cpu: 10m
+            memory: 20Mi
+        requests:
+            cpu: 5m
+            memory: 10Mi

@@ -1,0 +1,46 @@
+# =============================================================================
+# PostgreSQL Backup CronJob Configuration
+# =============================================================================
+
+# Backup schedule (cron format)
+# Default: 03:00 UTC every day
+schedule: "0 3 * * *"
+
+# PostgreSQL connection
+postgresql:
+    host: postgresql.storage.svc.cluster.local
+    port: 5432
+    database: appdb
+    user: appuser
+    # Password should be set via secret
+    existingSecret: postgresql
+    secretKey: password
+
+# Backup configuration
+backup:
+    retentionDays: 30
+    # Storage size for backup PVC
+    storageSize: 10Gi
+    storageClass: ""
+
+# Container resources
+resources:
+    requests:
+        memory: "64Mi"
+        cpu: "50m"
+    limits:
+        memory: "128Mi"
+        cpu: "200m"
+
+# Image configuration
+image:
+    repository: bitnami/postgresql
+    tag: "16"
+    pullPolicy: IfNotPresent
+
+# Additional databases to backup (optional)
+additionalDatabases: [ ]
+# - keycloak
+
+# Namespace where PostgreSQL secret exists
+postgresqlNamespace: storage

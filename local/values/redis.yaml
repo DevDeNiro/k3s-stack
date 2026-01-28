@@ -1,0 +1,104 @@
+architecture: standalone
+
+auth:
+    enabled: true
+    sentinel: false
+
+master:
+    resources:
+        requests:
+            memory: "256Mi"
+            cpu: "100m"
+        limits:
+            memory: "512Mi"
+            cpu: "200m"
+
+    persistence:
+        enabled: true
+        size: "4Gi"
+        storageClass: ""
+        accessModes:
+            - ReadWriteOnce
+
+    configuration: |
+        maxmemory 256mb
+        maxmemory-policy allkeys-lru
+        
+        save 900 1
+        save 300 10
+        save 60 10000
+        
+        protected-mode yes
+        
+        bind 0.0.0.0
+        
+        tcp-keepalive 300
+        timeout 0
+        tcp-backlog 511
+        
+        loglevel notice
+        
+        latency-monitor-threshold 100
+
+    podAnnotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "6379"
+
+    podLabels:
+        app: redis
+        component: cache
+
+    service:
+        type: ClusterIP
+        ports:
+            redis: 6379
+        # AJOUT: Pour faciliter l'accès
+        annotations:
+            service.beta.kubernetes.io/external-traffic: OnlyLocal
+
+# Replica configuration (disabled for standalone)
+replica:
+    replicaCount: 0
+
+sentinel:
+    enabled: false
+
+metrics:
+    enabled: true
+    resources:
+        requests:
+            memory: "64Mi"
+            cpu: "50m"
+        limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+    service:
+        type: ClusterIP
+        annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "9121"
+
+    serviceMonitor:
+        enabled: false
+
+# Probes améliorées pour dev
+livenessProbe:
+    enabled: true
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 3
+
+readinessProbe:
+    enabled: true
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 3
+
+extraEnvVars:
+    -   name: REDIS_AOF_ENABLED
+        value: "no"
