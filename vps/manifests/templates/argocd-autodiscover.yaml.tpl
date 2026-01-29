@@ -30,10 +30,8 @@ spec:
                         key: token
                     allBranches: false
                 cloneProtocol: https
-                filters:
-                    -   repositoryMatch: ".*"
-                    -   pathsExist:
-                            - helm/{{repository}}/values-alpha.yaml
+                # Note: pathsExist filter doesn't support template variables
+                # Repos without helm/{{repository}}/values-alpha.yaml will fail sync
 
     template:
         metadata:
@@ -90,10 +88,8 @@ spec:
                         key: token
                     allBranches: false
                 cloneProtocol: https
-                filters:
-                    -   repositoryMatch: ".*"
-                    -   pathsExist:
-                            - helm/{{repository}}/values-prod.yaml
+                # Note: pathsExist filter doesn't support template variables
+                # Repos without helm/{{repository}}/values-prod.yaml will fail sync
 
     template:
         metadata:
