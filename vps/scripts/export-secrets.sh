@@ -262,10 +262,10 @@ fetch_from_k8s() {
 # =============================================================================
 set_github_token() {
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}         Set GitHub Token for ArgoCD Auto-Discovery             ${NC}"
+    echo -e "${YELLOW}         Set SCM Token for ArgoCD Auto-Discovery               ${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "${YELLOW}This will create/update the github-token secret in ArgoCD namespace.${NC}"
+    echo -e "${YELLOW}This will create/update the scm-token secret in ArgoCD namespace.${NC}"
     echo -e "${YELLOW}The token needs 'repo' scope for private repositories.${NC}"
     echo ""
     
@@ -295,16 +295,16 @@ set_github_token() {
     chmod 600 "$tmp_file"
     echo -n "$github_token" > "$tmp_file"
     
-    # Create/update secret
-    kubectl delete secret github-token -n argocd 2>/dev/null || true
-    kubectl create secret generic github-token -n argocd --from-file=token="$tmp_file"
+    # Create/update secret (scm-token is referenced by ApplicationSet)
+    kubectl delete secret scm-token -n argocd 2>/dev/null || true
+    kubectl create secret generic scm-token -n argocd --from-file=token="$tmp_file"
     
     # Securely remove temp file
     shred -u "$tmp_file" 2>/dev/null || rm -f "$tmp_file"
     
     echo ""
-    echo -e "${GREEN}✓ GitHub token configured successfully${NC}"
-    echo -e "${YELLOW}ArgoCD will now be able to scan your private repositories.${NC}"
+    echo -e "${GREEN}✓ SCM token configured successfully${NC}"
+    echo -e "${YELLOW}ArgoCD will now be able to scan your repositories.${NC}"
 }
 
 # =============================================================================

@@ -4,23 +4,14 @@
 # =============================================================================
 #
 # Generated from template. Do not edit directly.
-# Edit vps/config.env and run: ./vps/apply-config.sh
+# Edit vps/config.env and run: ./vps/scripts/apply-config.sh
+#
+# Prerequisites:
+#   1. Configure SCM token: sudo ./vps/scripts/export-secrets.sh set-github-token
+#   2. Generate manifests: ./vps/scripts/apply-config.sh
+#   3. Apply: kubectl apply -f vps/manifests/argocd-autodiscover.yaml
 #
 # =============================================================================
-
----
-# Secret containing SCM token for API access
-# Set via: sudo ./vps/export-secrets.sh set-github-token
-apiVersion: v1
-kind: Secret
-metadata:
-    name: scm-token
-    namespace: argocd
-    labels:
-        app.kubernetes.io/name: argocd-autodiscover
-type: Opaque
-stringData:
-    token: ""  # Set via kubectl or SealedSecret
 
 ---
 # ApplicationSet - Alpha environments (develop branch)
