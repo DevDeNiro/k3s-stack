@@ -31,8 +31,9 @@ spec:
                     allBranches: false
                 cloneProtocol: https
                 filters:
+                    -   repositoryMatch: ".*"
                     -   pathsExist:
-                            - helm/*/values-alpha.yaml
+                            - helm/{{repository}}/values-alpha.yaml
 
     template:
         metadata:
@@ -90,8 +91,9 @@ spec:
                     allBranches: false
                 cloneProtocol: https
                 filters:
+                    -   repositoryMatch: ".*"
                     -   pathsExist:
-                            - helm/*/values-prod.yaml
+                            - helm/{{repository}}/values-prod.yaml
 
     template:
         metadata:
