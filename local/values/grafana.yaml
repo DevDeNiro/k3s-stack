@@ -1,0 +1,65 @@
+admin:
+    existingSecret: ""
+    userKey: admin-user
+    passwordKey: admin-password
+
+persistence:
+    enabled: true
+    size: 5Gi
+
+datasources:
+    datasources.yaml:
+        apiVersion: 1
+        datasources:
+            -   name: Prometheus
+                type: prometheus
+                url: http://prometheus-server.monitoring.svc.cluster.local
+                access: proxy
+                isDefault: true
+
+dashboardProviders:
+    dashboardproviders.yaml:
+        apiVersion: 1
+        providers:
+            -   name: 'default'
+                orgId: 1
+                folder: ''
+                type: file
+                disableDeletion: false
+                editable: true
+                options:
+                    path: /var/lib/grafana/dashboards/default
+
+dashboards:
+    default:
+        kubernetes:
+            gnetId: 6417
+            revision: 1
+            datasource: Prometheus
+        node-exporter:
+            gnetId: 1860
+            revision: 23
+            datasource: Prometheus
+
+resources:
+    limits:
+        cpu: 500m
+        memory: 512Mi
+    requests:
+        cpu: 200m
+        memory: 256Mi
+
+securityContext:
+    runAsUser: 472
+    runAsGroup: 472
+    fsGroup: 472
+
+service:
+    type: ClusterIP
+    port: 80
+
+serviceAccount:
+    create: true
+
+rbac:
+    create: true

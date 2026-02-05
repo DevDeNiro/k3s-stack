@@ -1,0 +1,61 @@
+replicas: 1
+
+image: "docker.elastic.co/kibana/kibana"
+imageTag: "8.5.1"
+
+# Elasticsearch connection
+elasticsearchHosts: "http://elasticsearch-master:9200"
+
+# Service configuration
+service:
+    type: ClusterIP
+    port: 5601
+
+# Resources
+resources:
+    requests:
+        cpu: "250m"
+        memory: "512Mi"
+    limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+# Health checks
+healthCheckPath: "/app/kibana"
+
+# Kibana configuration
+kibanaConfig:
+    kibana.yml: |
+        server.host: 0.0.0.0
+        server.port: 5601
+        elasticsearch.hosts: ["http://elasticsearch-master:9200"]
+        xpack.security.enabled: false
+        xpack.encryptedSavedObjects.encryptionKey: "something_at_least_32_characters_long"
+
+# Pod security context
+podSecurityContext:
+    fsGroup: 1000
+
+# Container security context
+securityContext:
+    capabilities:
+        drop:
+            - ALL
+    runAsNonRoot: true
+    runAsUser: 1000
+
+# Environment variables
+extraEnvs:
+    -   name: ELASTICSEARCH_URL
+        value: "http://elasticsearch-master:9200"
+    -   name: ELASTICSEARCH_HOSTS
+        value: "http://elasticsearch-master:9200"
+
+# Node labels for pod assignment
+nodeSelector: { }
+
+# Tolerations for pod assignment
+tolerations: [ ]
+
+# Anti-affinity
+antiAffinity: "soft"

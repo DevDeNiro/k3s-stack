@@ -1,0 +1,120 @@
+# =============================================================================
+# Migration Job Template for ArgoCD PreSync Hook
+# =============================================================================
+# INSTRUCTIONS:
+# 1. Copy this file to: <your-app>/helm/<chart>/templates/migration-job.yaml
+# 2. Replace ALL occurrences of "MYAPP" with your chart's helper prefix
+#    (defined in _helpers.tpl, e.g., "coterie" for coterie.fullname)
+# 3. Configure migration.enabled in values.yaml
+# 4. Uncomment and adapt ONE migration strategy below
+#
+# The PreSync hook runs BEFORE other resources are updated, ensuring
+# database migrations are applied before the application starts.
+#
+# Secret created by onboard-app.sh: <app>-db (contains host, port, database,
+# username, password, url, r2dbc-url)
+# =============================================================================
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "MYAPP.fullname" . }}-migration-{{ .Release.Revision }}
+  labels:
+    {{- include "MYAPP.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "MYAPP.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "MYAPP.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migration
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          
+          # === CHOOSE ONE STRATEGY ===
+          
+          # --- Strategy A: Spring Boot + Liquibase (recommended) ---
+          # No command needed - Spring Boot runs Liquibase automatically
+          # Just set SPRING_MAIN_WEB_APPLICATION_TYPE=none to exit after migrations
+          
+          # --- Strategy B: Spring Boot + Flyway ---
+          # Same as Liquibase - Flyway runs at startup automatically
+          
+          # --- Strategy C: Standalone Flyway CLI ---
+          # command: ["flyway", "migrate"]
+          
+          # --- Strategy D: Standalone Liquibase CLI ---
+          # command: ["liquibase", "--changeLogFile=changelog.xml", "update"]
+          
+          # --- Strategy E: Custom script ---
+          # command: ["/bin/sh", "-c", "/app/migrate.sh"]
+          
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: {{ .Values.spring.profiles.active | quote }}
+            # Database connection from values.yaml (matches onboard-app.sh secret)
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:postgresql://{{ .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }}"
+            - name: SPRING_DATASOURCE_USERNAME
+              value: {{ .Values.database.username | quote }}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.secretKey }}
+            # Disable web server - only run migrations
+            - name: SPRING_MAIN_WEB_APPLICATION_TYPE
+              value: "none"
+            # Ensure migration tool runs
+            - name: SPRING_LIQUIBASE_ENABLED
+              value: "true"
+            # JVM options
+            - name: JAVA_OPTS
+              value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+
+# =============================================================================
+# Required values.yaml configuration:
+# =============================================================================
+# migration:
+#   enabled: true
+#
+# database:
+#   host: postgresql.storage.svc.cluster.local
+#   port: 5432
+#   name: myapp-alpha          # or myapp-prod (created by onboard-app.sh)
+#   username: myapp-alpha      # matches database name
+#   existingSecret: myapp-db   # secret created by onboard-app.sh
+#   secretKey: password
+# =============================================================================

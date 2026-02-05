@@ -1,0 +1,81 @@
+# Authentication configuration
+auth:
+    enablePostgresUser: true
+    database: "appdb"   # Generic database name for local development
+    username: "appuser" # Generic username for local development
+    # Passwords will be set via command line for security (eg. ./install.sh)
+
+architecture: standalone
+
+primary:
+    resources:
+        requests:
+            memory: "256Mi"
+            cpu: "250m"
+        limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+    persistence:
+        enabled: true
+        size: "4Gi"
+        storageClass: ""
+        accessModes:
+            - ReadWriteOnce
+
+    # PostgreSQL configuration
+    pgHbaConfiguration: |
+        local all all scram-sha-256
+        host all all 127.0.0.1/32 scram-sha-256
+        host all all ::1/128 scram-sha-256
+        host all all 0.0.0.0/0 scram-sha-256
+
+    configuration: |
+        shared_buffers = 128MB
+        effective_cache_size = 256MB
+        max_connections = 100
+        
+        listen_addresses = '*'
+        
+        log_statement = 'mod'
+        log_duration = off
+        log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+        
+        random_page_cost = 1.1
+        effective_io_concurrency = 200
+
+# Service configuration
+service:
+    type: ClusterIP
+    ports:
+        postgresql: 5432
+    annotations:
+        service.beta.kubernetes.io/external-traffic: OnlyLocal
+
+# Metrics and monitoring
+metrics:
+    enabled: true
+    service:
+        type: ClusterIP
+        annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "9187"
+    serviceMonitor:
+        enabled: false
+
+# Security context
+securityContext:
+    enabled: true
+    fsGroup: 1001
+    runAsUser: 1001
+
+# Pod labels
+podLabels:
+    app: postgresql
+    component: database
+
+extraEnvVars:
+    - name: POSTGRESQL_LOG_CONNECTIONS
+      value: "true"
+    - name: POSTGRESQL_LOG_DISCONNECTIONS
+      value: "true"

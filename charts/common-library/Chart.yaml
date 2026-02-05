@@ -1,0 +1,23 @@
+apiVersion: v2
+name: common-library
+description: |
+  Reusable Helm library chart for K3s stack applications.
+  Provides common templates for: Deployment, Service, Ingress, ServiceAccount,
+  Namespace (with ResourceQuota/LimitRange), NetworkPolicy, and SealedSecrets.
+version: 1.1.0
+type: library
+
+maintainers:
+  - name: DevDeNiro
+
+keywords:
+  - kubernetes
+  - k3s
+  - library
+  - helm
+  - templates
+  - gitops
+
+home: https://github.com/DevDeNiro/k3s-stack
+sources:
+  - https://github.com/DevDeNiro/k3s-stack

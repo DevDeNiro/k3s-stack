@@ -1,0 +1,284 @@
+# ==============================================================================
+# COMMON-LIBRARY - Reference Values
+# This file documents all supported values for charts using this library.
+# Copy relevant sections to your application's values.yaml
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# GLOBAL CONFIGURATION
+# ------------------------------------------------------------------------------
+global:
+  # Environment name (dev, alpha, prod)
+  environment: dev
+  # Project name (used for namespace naming)
+  project: ""
+  # Base domain for auto-generated hostnames
+  baseDomain: local
+  # MonoRepo mode: namespace = environment only
+  isMonoRepo: false
+
+# ------------------------------------------------------------------------------
+# IMAGE
+# ------------------------------------------------------------------------------
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+#  - name: docker-registry-secret
+
+# ------------------------------------------------------------------------------
+# REPLICA & AUTOSCALING
+# ------------------------------------------------------------------------------
+replicaCount: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+# ------------------------------------------------------------------------------
+# SERVICE
+# ------------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  # nodePort: 30000  # Only for NodePort type
+  # loadBalancerIP: ""  # Only for LoadBalancer type
+  annotations: {}
+
+# ------------------------------------------------------------------------------
+# INGRESS
+# ------------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  
+  # Mode 1: Explicit hosts list (recommended)
+  hosts: []
+  #  - host: app.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
+  
+  # Mode 2: Auto-generated hostname (uses global.baseDomain)
+  # If hosts is empty, hostname = <chart-name>.<environment>.<baseDomain>
+  path: /
+  pathType: Prefix
+  
+  tls: []
+  #  - secretName: app-tls
+  #    hosts:
+  #      - app.example.com
+
+# ------------------------------------------------------------------------------
+# SERVICE ACCOUNT & RBAC
+# ------------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automount: true
+
+rbac:
+  create: false
+  # Namespace-scoped rules
+  rules: []
+  #  - apiGroups: [""]
+  #    resources: ["configmaps"]
+  #    verbs: ["get", "list"]
+  
+  # Cluster-wide permissions
+  clusterWide: false
+  clusterRules: []
+  
+  # Extra subjects for RoleBinding
+  extraSubjects: []
+  #  - kind: ServiceAccount
+  #    name: gitlab-runner
+  #    namespace: gitlab-runner
+  
+  roleRef:
+    kind: Role
+    name: ""  # Defaults to fullname
+
+# ------------------------------------------------------------------------------
+# NAMESPACE
+# ------------------------------------------------------------------------------
+namespace:
+  create: false
+  environment: ""  # Falls back to global.environment
+  
+  resourceQuota:
+    enabled: false
+    hard:
+      requests.cpu: "2"
+      requests.memory: 2Gi
+      limits.cpu: "4"
+      limits.memory: 4Gi
+      pods: "20"
+  
+  limitRange:
+    enabled: false
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+
+# ------------------------------------------------------------------------------
+# NETWORK POLICY
+# ------------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  
+  # Namespaces
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+  databaseNamespace: storage
+  authNamespace: security
+  
+  # Allow rules
+  allowMonitoring: true
+  allowDatabase: true
+  allowAuth: true
+  allowOtel: false
+  allowExternal: false
+  
+  # Database port (PostgreSQL default)
+  databasePort: 5432
+  
+  # Extra rules
+  extraIngress: []
+  extraEgress: []
+
+# ------------------------------------------------------------------------------
+# SEALED SECRETS
+# ------------------------------------------------------------------------------
+sealedSecrets:
+  enabled: false
+  
+  # Docker registry secret
+  dockerRegistry:
+    name: docker-registry-secret
+    encryptedData: ""
+  
+  # Generic secrets list
+  secrets: []
+  #  - name: postgresql
+  #    data:
+  #      password: "AgB..."
+  #  - name: keycloak-client
+  #    data:
+  #      client-secret: "AgD..."
+  
+  # Legacy format (for backward compatibility)
+  ghcr:
+    encryptedData: ""
+  postgresql:
+    encryptedData: ""
+  keycloak:
+    encryptedData: ""
+
+# ------------------------------------------------------------------------------
+# POD CONFIGURATION
+# ------------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+#  fsGroup: 1001
+#  seccompProfile:
+#    type: RuntimeDefault
+
+securityContext: {}
+#  runAsUser: 1001
+#  runAsNonRoot: true
+#  allowPrivilegeEscalation: false
+#  readOnlyRootFilesystem: true
+#  capabilities:
+#    drop:
+#      - ALL
+
+# ------------------------------------------------------------------------------
+# RESOURCES
+# ------------------------------------------------------------------------------
+resources: {}
+#  requests:
+#    memory: "256Mi"
+#    cpu: "100m"
+#  limits:
+#    memory: "512Mi"
+#    cpu: "500m"
+
+# ------------------------------------------------------------------------------
+# PROBES
+# ------------------------------------------------------------------------------
+# Option 1: Full probe configuration
+livenessProbe: {}
+#  httpGet:
+#    path: /health
+#    port: http
+#  initialDelaySeconds: 30
+#  periodSeconds: 10
+
+readinessProbe: {}
+#  httpGet:
+#    path: /health
+#    port: http
+#  initialDelaySeconds: 5
+#  periodSeconds: 5
+
+# Option 2: Simple healthcheck (used if probes not defined)
+healthcheck:
+  path: /health
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+# ------------------------------------------------------------------------------
+# ENVIRONMENT VARIABLES
+# ------------------------------------------------------------------------------
+env: {}
+#  MY_VAR: "value"
+
+envSecrets: {}
+#  SECRET_KEY: "key-in-secret"
+
+extraEnv: []
+#  - name: CUSTOM_VAR
+#    value: "custom-value"
+
+extraEnvFrom: []
+#  - secretRef:
+#      name: my-secret
+
+# ------------------------------------------------------------------------------
+# VOLUMES
+# ------------------------------------------------------------------------------
+volumes: []
+volumeMounts: []
+
+# ------------------------------------------------------------------------------
+# SCHEDULING
+# ------------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ------------------------------------------------------------------------------
+# LEGACY - Database & Keycloak (for sealed secrets)
+# ------------------------------------------------------------------------------
+database:
+  existingSecret: postgresql
+  secretKey: password
+
+keycloak:
+  existingSecret: keycloak-client
+  secretKey: client-secret

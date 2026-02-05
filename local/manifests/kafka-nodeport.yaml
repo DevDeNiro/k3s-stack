@@ -1,0 +1,21 @@
+# NodePort is already created automatically by BitNami
+apiVersion: v1
+kind: Service
+metadata:
+    name: kafka-nodeport
+    namespace: messaging
+    labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/component: kafka
+spec:
+    type: NodePort
+    ports:
+        -   port: 9095
+            targetPort: 9095
+            nodePort: 30092
+            protocol: TCP
+            name: kafka-external
+    selector:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/instance: kafka
+        app.kubernetes.io/component: broker

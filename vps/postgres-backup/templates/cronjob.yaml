@@ -1,0 +1,181 @@
+{{- $root := . -}}
+{{- $schedules := dict "daily" .Values.schedules.daily "weekly" .Values.schedules.weekly "monthly" .Values.schedules.monthly -}}
+
+{{- range $name, $schedule := $schedules }}
+{{- if $schedule.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $root.Release.Name }}-{{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: postgres-backup
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+    app.kubernetes.io/component: backup-{{ $name }}
+spec:
+  schedule: {{ $schedule.cron | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: postgres-backup
+            app.kubernetes.io/instance: {{ $root.Release.Name }}
+            app.kubernetes.io/component: backup-{{ $name }}
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: backup
+              image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+              imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  
+                  BACKUP_TYPE="{{ $name }}"
+                  TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+                  BACKUP_DIR="{{ $root.Values.localStorage.mountPath }}/${BACKUP_TYPE}"
+                  RETENTION_DAYS={{ $schedule.retentionDays }}
+                  
+                  mkdir -p "$BACKUP_DIR"
+                  
+                  echo "=========================================="
+                  echo "[INFO] PostgreSQL Backup - ${BACKUP_TYPE^^}"
+                  echo "[INFO] Timestamp: $TIMESTAMP"
+                  echo "[INFO] Retention: $RETENTION_DAYS days"
+                  echo "=========================================="
+                  
+                  # Discover databases to backup
+                  DATABASES=""
+                  
+                  {{- if eq $root.Values.databases "auto" }}
+                  echo "[INFO] Auto-discovering production databases..."
+                  
+                  # Get all databases ending with -prod
+                  PROD_DBS=$(PGPASSWORD="$PGPASSWORD" psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d postgres -t -c \
+                    "SELECT datname FROM pg_database WHERE datname LIKE '%-prod' AND datistemplate = false;" | tr -d ' ')
+                  
+                  # Add infrastructure databases
+                  INFRA_DBS="{{ join " " $root.Values.infrastructureDatabases }}"
+                  
+                  DATABASES="$PROD_DBS $INFRA_DBS"
+                  {{- else }}
+                  DATABASES="{{ join " " $root.Values.databases }}"
+                  {{- end }}
+                  
+                  echo "[INFO] Databases to backup: $DATABASES"
+                  
+                  # Backup each database
+                  for DB in $DATABASES; do
+                    if [[ -z "$DB" ]]; then
+                      continue
+                    fi
+                    
+                    echo ""
+                    echo "[INFO] Backing up database: $DB"
+                    
+                    BACKUP_FILE="${BACKUP_DIR}/${DB}_${TIMESTAMP}.dump"
+                    
+                    if ! PGPASSWORD="$PGPASSWORD" pg_dump \
+                      -h "$POSTGRES_HOST" \
+                      -p "$POSTGRES_PORT" \
+                      -U "$POSTGRES_USER" \
+                      -d "$DB" \
+                      -Fc \
+                      --no-owner \
+                      --no-acl \
+                      -f "$BACKUP_FILE" 2>/dev/null; then
+                      echo "[WARN] Failed to backup $DB (may not exist)"
+                      continue
+                    fi
+                    
+                    # Compress
+                    gzip -f "$BACKUP_FILE"
+                    
+                    BACKUP_SIZE=$(du -h "${BACKUP_FILE}.gz" | cut -f1)
+                    echo "[INFO] ✓ $DB backed up: ${BACKUP_FILE}.gz ($BACKUP_SIZE)"
+                    
+                    {{- if $root.Values.s3.enabled }}
+                    # Upload to S3
+                    echo "[INFO] Uploading $DB to S3..."
+                    S3_PATH="s3://{{ $root.Values.s3.bucket }}/{{ $root.Values.s3.prefix }}/${BACKUP_TYPE}/${DB}_${TIMESTAMP}.dump.gz"
+                    
+                    if aws s3 cp "${BACKUP_FILE}.gz" "$S3_PATH" \
+                      --endpoint-url "{{ $root.Values.s3.endpoint }}" \
+                      --region "{{ $root.Values.s3.region }}"; then
+                      echo "[INFO] ✓ Uploaded to $S3_PATH"
+                    else
+                      echo "[WARN] Failed to upload to S3"
+                    fi
+                    {{- end }}
+                  done
+                  
+                  # Cleanup old local backups
+                  echo ""
+                  echo "[INFO] Cleaning up backups older than $RETENTION_DAYS days..."
+                  find "$BACKUP_DIR" -name "*.dump.gz" -type f -mtime +$RETENTION_DAYS -delete -print || true
+                  
+                  {{- if $root.Values.s3.enabled }}
+                  # Cleanup old S3 backups (simplified - just log, actual cleanup via S3 lifecycle)
+                  echo "[INFO] S3 cleanup should be configured via bucket lifecycle policies"
+                  {{- end }}
+                  
+                  # Summary
+                  echo ""
+                  echo "=========================================="
+                  echo "[INFO] Backup Summary"
+                  echo "=========================================="
+                  echo "[INFO] Local backups in $BACKUP_DIR:"
+                  ls -lh "$BACKUP_DIR"/*.dump.gz 2>/dev/null | tail -10 || echo "  No backups found"
+                  echo ""
+                  echo "[INFO] Backup completed successfully!"
+              env:
+                - name: POSTGRES_HOST
+                  value: {{ $root.Values.postgresql.host | quote }}
+                - name: POSTGRES_PORT
+                  value: {{ $root.Values.postgresql.port | quote }}
+                - name: POSTGRES_USER
+                  value: {{ $root.Values.postgresql.adminUser | quote }}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.postgresql.existingSecret }}
+                      key: {{ $root.Values.postgresql.secretKey }}
+                {{- if $root.Values.s3.enabled }}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.s3.existingSecret }}
+                      key: {{ $root.Values.s3.accessKeyKey }}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.s3.existingSecret }}
+                      key: {{ $root.Values.s3.secretKeyKey }}
+                {{- end }}
+              resources:
+                {{- toYaml $root.Values.resources | nindent 16 }}
+              volumeMounts:
+                {{- if $root.Values.localStorage.enabled }}
+                - name: backup-storage
+                  mountPath: {{ $root.Values.localStorage.mountPath }}
+                {{- end }}
+          volumes:
+            {{- if $root.Values.localStorage.enabled }}
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: {{ $root.Release.Name }}-pvc
+            {{- end }}
+{{- end }}
+{{- end }}
