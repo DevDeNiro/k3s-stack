@@ -46,19 +46,28 @@ sudo ./vps/scripts/setup-cert-manager.sh --email admin@yourdomain.com
 sudo ./vps/scripts/setup-gateway-api.sh --domain yourdomain.com
 ```
 
-### 4. Configurer DNS
+### 4. Configurer CoreDNS (hairpin NAT)
+
+```bash
+sudo ./vps/scripts/setup-coredns-hosts.sh --domain yourdomain.com
+```
+
+> Configure CoreDNS pour résoudre `auth.<domain>` vers Keycloak en interne.
+> Nécessaire pour que les pods puissent accéder à Keycloak via l'URL externe.
+
+### 5. Configurer DNS
 
 ```
 *.yourdomain.com    A    <VPS-IP>
 ```
 
-### 5. Configurer le token SCM (GitHub/GitLab)
+### 6. Configurer le token SCM (GitHub/GitLab)
 
 ```bash
 sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
 ```
 
-### 6. Onboarder une application
+### 7. Onboarder une application
 
 ```bash
 # Avec subdomains par défaut (alpha.domain, app.domain)
@@ -78,13 +87,13 @@ SKIP_GATEWAY=true sudo ./vps/scripts/onboard-app.sh <app-name>
 > - Listeners HTTPS sur le Gateway
 > - Secrets GHCR et ServiceAccounts CI/CD
 
-### 7. Exporter le certificat Sealed Secrets
+### 8. Exporter le certificat Sealed Secrets
 
 ```bash
 sudo ./vps/scripts/export-secrets.sh export-cert /tmp/sealed-secrets-pub.pem
 ```
 
-### 8. Vérifier l'installation
+### 9. Vérifier l'installation
 
 ```bash
 sudo kubectl get pods -A

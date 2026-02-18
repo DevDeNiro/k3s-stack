@@ -393,11 +393,31 @@ configure_coredns_internal_hosts() {
     # Add entry to NodeHosts
     echo -e "${YELLOW}Adding ${auth_hostname} → ${keycloak_ip} to CoreDNS...${NC}"
     
-    local new_hosts="${current_hosts}
-${keycloak_ip} ${auth_hostname}"
+    # Create temporary file with new hosts content
+    local tmp_file
+    tmp_file=$(mktemp)
     
-    # Patch the ConfigMap
-    kubectl patch configmap coredns -n kube-system --type=merge -p "{\"data\":{\"NodeHosts\":\"${new_hosts}\"}}"
+    # Write current hosts + new entry
+    echo "${current_hosts}" > "$tmp_file"
+    echo "${keycloak_ip} ${auth_hostname}" >> "$tmp_file"
+    
+    # Read back as single string (preserves newlines properly)
+    local new_hosts_content
+    new_hosts_content=$(cat "$tmp_file")
+    rm -f "$tmp_file"
+    
+    # Create patch file
+    local patch_file
+    patch_file=$(mktemp)
+    cat > "$patch_file" <<EOF
+data:
+  NodeHosts: |
+$(echo "$new_hosts_content" | sed 's/^/    /')
+EOF
+    
+    # Apply patch
+    kubectl patch configmap coredns -n kube-system --type=strategic --patch-file="$patch_file"
+    rm -f "$patch_file"
     
     # Restart CoreDNS to pick up changes
     kubectl rollout restart deployment coredns -n kube-system

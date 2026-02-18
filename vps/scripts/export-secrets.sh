@@ -411,6 +411,19 @@ create_repo_creds_secret() {
         --from-literal=token="$password" \
         --dry-run=client -o yaml | kubectl apply -f -
     
+    # Create docker-registry secret for ArgoCD Image Updater (GHCR access)
+    # Image Updater needs this to list tags from private container registries
+    if [[ "$secret_name" == "github-repo-creds" ]]; then
+        echo "Creating GHCR registry secret for Image Updater..."
+        kubectl delete secret ghcr-registry-secret -n argocd 2>/dev/null || true
+        kubectl create secret docker-registry ghcr-registry-secret \
+            --namespace argocd \
+            --docker-server=ghcr.io \
+            --docker-username="$username" \
+            --docker-password="$password"
+        echo -e "${GREEN}✓ ghcr-registry-secret created for Image Updater${NC}"
+    fi
+    
     # Save token to secrets directory for reuse (e.g., by onboard-app.sh)
     mkdir -p "$ROOT_SECRETS_DIR"
     echo "SCM_TOKEN=${password}" > "${ROOT_SECRETS_DIR}/scm-credentials.env"
