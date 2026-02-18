@@ -5,7 +5,7 @@ description: |
   Provides common templates for: Deployment, Service, HTTPRoute (Gateway API),
   ServiceAccount, Namespace (with ResourceQuota/LimitRange), NetworkPolicy,
   and SealedSecrets.
-version: 2.1.0
+version: 2.2.0
 type: library
 
 maintainers:
