@@ -701,26 +701,46 @@ print_summary() {
         echo -e "  Usage: rate limiting, caching (no persistence)"
     fi
     
-    echo -e "\n${YELLOW}Next steps:${NC}"
+    echo -e "\n${YELLOW}Next steps (see vps/docs/vps-deployment.md for details):${NC}"
+    
+    local step=1
+    
+    # Step: Configure TLS (cert-manager)
+    echo -e "  ${step}. Configure TLS (cert-manager):"
+    echo -e "     ${BLUE}sudo ./vps/scripts/setup-cert-manager.sh --email admin@yourdomain.com${NC}"
+    ((step++))
+    
+    # Step: Configure Gateway API or Ingress
     if [[ "$INSTALL_GATEWAY_API" == "true" ]]; then
-        echo -e "  1. Configure Gateway API with your domain:"
-        echo -e "     ${BLUE}./vps/scripts/setup-gateway-api.sh --domain yourdomain.com --tls${NC}"
+        echo -e "  ${step}. Configure Gateway API:"
+        echo -e "     ${BLUE}sudo ./vps/scripts/setup-gateway-api.sh --domain yourdomain.com${NC}"
     else
-        echo -e "  1. Configure Ingress with your domain:"
-        echo -e "     ${BLUE}./vps/scripts/setup-ingress.sh --domain yourdomain.com${NC}"
-        echo -e "  2. (Optional) Enable TLS with Let's Encrypt:"
-        echo -e "     ${BLUE}./vps/scripts/setup-ingress.sh --domain yourdomain.com --tls --cert-manager --email you@email.com${NC}"
+        echo -e "  ${step}. Configure Ingress:"
+        echo -e "     ${BLUE}sudo ./vps/scripts/setup-ingress.sh --domain yourdomain.com --tls${NC}"
     fi
-    echo -e "  3. From your local machine, configure kubectl:"
-    echo -e "     ${BLUE}./vps/scripts/setup-remote.sh ${EXTERNAL_IP}${NC}"
-    echo -e "  4. Create application namespaces:"
-    echo -e "     ${BLUE}./scripts/create-app-namespaces.sh <app-name>${NC}"
-    echo -e "  5. Deploy your application:"
-    echo -e "     ${BLUE}helm install <app>-alpha ./helm/<app> -n <app>-alpha -f values-alpha.yaml${NC}"
+    ((step++))
+    
+    # Step: Configure DNS
+    echo -e "  ${step}. Configure DNS:"
+    echo -e "     ${BLUE}*.yourdomain.com  A  ${EXTERNAL_IP}${NC}"
+    ((step++))
+    
+    # Step: Configure SCM token
+    echo -e "  ${step}. Configure SCM token (GitHub/GitLab):"
+    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh set-scm-credentials github${NC}"
+    ((step++))
+    
+    # Step: Onboard application
+    echo -e "  ${step}. Onboard your application:"
+    echo -e "     ${BLUE}sudo ./vps/scripts/onboard-app.sh <app-name>${NC}"
+    ((step++))
+    
+    # Step: Export Sealed Secrets cert
+    echo -e "  ${step}. Export Sealed Secrets certificate:"
+    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh export-cert /tmp/sealed-secrets-pub.pem${NC}"
     
     echo -e "\n${RED}⚠️  IMPORTANT: Credentials are stored securely in /root/.k3s-secrets/${NC}"
     echo -e "  ${BLUE}View: sudo ./vps/scripts/export-secrets.sh show${NC}"
-    echo -e "  ${BLUE}Export cert: sudo ./vps/scripts/export-secrets.sh export-cert /tmp/cert.pem${NC}"
 }
 
 # -----------------------------------------------------------------------------

@@ -48,27 +48,3 @@ spec:
           allowedRoutes:
               namespaces:
                   from: All
-
----
-# ReferenceGrant to allow HTTPRoutes from other namespaces to reference this Gateway
-# This is required for cross-namespace routing
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: ReferenceGrant
-metadata:
-    name: allow-all-httproutes
-    namespace: nginx-gateway
-    labels:
-        app.kubernetes.io/name: infrastructure-gateway
-        app.kubernetes.io/component: gateway
-        app.kubernetes.io/managed-by: k3s-vps
-spec:
-    from:
-        # Allow HTTPRoutes from any namespace
-        - group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          namespace: "*"
-    to:
-        # To reference the Gateway
-        - group: gateway.networking.k8s.io
-          kind: Gateway
-          name: infrastructure-gateway

@@ -230,26 +230,6 @@ EOF
                   from: All
 EOF
         fi
-        
-        # Add ReferenceGrant
-        cat >> "$output_file" <<EOF
-
----
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: ReferenceGrant
-metadata:
-    name: allow-all-httproutes
-    namespace: nginx-gateway
-spec:
-    from:
-        - group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          namespace: "*"
-    to:
-        - group: gateway.networking.k8s.io
-          kind: Gateway
-          name: infrastructure-gateway
-EOF
     fi
     
     # Apply the Gateway
