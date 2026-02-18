@@ -1,0 +1,146 @@
+# =============================================================================
+# ArgoCD Auto-Discovery ApplicationSets
+# Automatically discovers repositories with a helm/ directory and creates
+# ArgoCD Applications for alpha (develop branch) and prod (main branch)
+# =============================================================================
+#
+# IMPORTANT: The SCM provider does NOT support glob patterns in pathsExist.
+# Use "helm" instead of "helm/*/values-alpha.yaml"
+#
+# Prerequisites:
+# 1. SCM token secret: sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
+# 2. Repo credentials: created automatically by export-secrets.sh
+#
+# =============================================================================
+
+---
+# Alpha Environment - tracks 'develop' branch
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: autodiscover-alpha
+  namespace: argocd
+spec:
+  generators:
+    - scmProvider:
+        github:
+          organization: "{{SCM_ORGANIZATION}}"
+          allBranches: false
+          tokenRef:
+            secretName: scm-token
+            key: token
+        cloneProtocol: https
+        filters:
+          # IMPORTANT: No glob patterns! Just check if 'helm' directory exists
+          - pathsExist:
+              - helm
+  template:
+    metadata:
+      name: "{{repository}}-alpha"
+      namespace: argocd
+      labels:
+        app.kubernetes.io/name: "{{repository}}"
+        app.kubernetes.io/environment: alpha
+        app.kubernetes.io/managed-by: argocd-autodiscover
+      annotations:
+        # ArgoCD Image Updater annotations
+        argocd-image-updater.argoproj.io/image-list: "app={{REGISTRY_BASE}}/{{repository}}"
+        argocd-image-updater.argoproj.io/app.update-strategy: newest-build
+        argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^([a-f0-9]{7,40}|sha-[a-f0-9]{7,40})$"
+        argocd-image-updater.argoproj.io/app.helm.image-name: image.repository
+        argocd-image-updater.argoproj.io/app.helm.image-tag: image.tag
+        argocd-image-updater.argoproj.io/write-back-method: argocd
+    spec:
+      project: default
+      source:
+        repoURL: "{{url}}"
+        targetRevision: develop
+        path: "helm/{{repository}}"
+        helm:
+          valueFiles:
+            - values.yaml
+            - values-alpha.yaml
+          parameters:
+            - name: image.repository
+              value: "{{REGISTRY_BASE}}/{{repository}}"
+            - name: image.tag
+              value: develop
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{repository}}-alpha"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+  # Ignore differences in image parameters (managed by Image Updater)
+  ignoreApplicationDifferences:
+    - jsonPointers:
+        - /spec/source/helm/parameters
+
+---
+# Production Environment - tracks 'main' branch
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: autodiscover-prod
+  namespace: argocd
+spec:
+  generators:
+    - scmProvider:
+        github:
+          organization: "{{SCM_ORGANIZATION}}"
+          allBranches: false
+          tokenRef:
+            secretName: scm-token
+            key: token
+        cloneProtocol: https
+        filters:
+          # IMPORTANT: No glob patterns! Just check if 'helm' directory exists
+          - pathsExist:
+              - helm
+  template:
+    metadata:
+      name: "{{repository}}-prod"
+      namespace: argocd
+      labels:
+        app.kubernetes.io/name: "{{repository}}"
+        app.kubernetes.io/environment: prod
+        app.kubernetes.io/managed-by: argocd-autodiscover
+      annotations:
+        # ArgoCD Image Updater annotations
+        argocd-image-updater.argoproj.io/image-list: "app={{REGISTRY_BASE}}/{{repository}}"
+        argocd-image-updater.argoproj.io/app.update-strategy: semver
+        argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        argocd-image-updater.argoproj.io/app.helm.image-name: image.repository
+        argocd-image-updater.argoproj.io/app.helm.image-tag: image.tag
+        argocd-image-updater.argoproj.io/write-back-method: argocd
+    spec:
+      project: default
+      source:
+        repoURL: "{{url}}"
+        targetRevision: main
+        path: "helm/{{repository}}"
+        helm:
+          valueFiles:
+            - values.yaml
+            - values-prod.yaml
+          parameters:
+            - name: image.repository
+              value: "{{REGISTRY_BASE}}/{{repository}}"
+            - name: image.tag
+              value: latest
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{repository}}-prod"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+  # Ignore differences in image parameters (managed by Image Updater)
+  ignoreApplicationDifferences:
+    - jsonPointers:
+        - /spec/source/helm/parameters

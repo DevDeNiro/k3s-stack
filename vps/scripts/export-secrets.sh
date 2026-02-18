@@ -295,10 +295,22 @@ set_github_credentials() {
     echo -e "${YELLOW}The token needs 'repo' scope (or 'Contents: read' for fine-grained).${NC}"
     echo ""
     
+    # Load config.env for default organization
+    local config_file
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    config_file="$(dirname "$script_dir")/config.env"
+    
+    local default_org="your-org"
+    if [[ -f "$config_file" ]]; then
+        source "$config_file"
+        default_org="${SCM_ORGANIZATION:-your-org}"
+    fi
+    
     # Get GitHub org/user URL
-    echo -n "Enter GitHub org/user URL [https://github.com/your-org]: "
+    echo -n "Enter GitHub org/user URL [https://github.com/${default_org}]: "
     read -r scm_url
-    scm_url="${scm_url:-https://github.com/your-org}"
+    scm_url="${scm_url:-https://github.com/${default_org}}"
     
     # Read token securely (hidden input)
     echo -n "Enter GitHub token (ghp_xxx or github_pat_xxx): "
@@ -399,7 +411,14 @@ create_repo_creds_secret() {
         --from-literal=token="$password" \
         --dry-run=client -o yaml | kubectl apply -f -
     
+    # Save token to secrets directory for reuse (e.g., by onboard-app.sh)
+    mkdir -p "$ROOT_SECRETS_DIR"
+    echo "SCM_TOKEN=${password}" > "${ROOT_SECRETS_DIR}/scm-credentials.env"
+    echo "SCM_URL=${url}" >> "${ROOT_SECRETS_DIR}/scm-credentials.env"
+    chmod 600 "${ROOT_SECRETS_DIR}/scm-credentials.env"
+    
     echo ""
+    echo -e "${GREEN}Token saved to ${ROOT_SECRETS_DIR}/scm-credentials.env${NC}"
     echo -e "${BLUE}Verify with:${NC}"
     echo -e "  kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=repo-creds"
     echo ""

@@ -351,6 +351,63 @@ install_keycloak() {
 }
 
 # -----------------------------------------------------------------------------
+# Configure CoreDNS for internal hostname resolution (hairpin NAT fix)
+# This allows pods to reach services via their external hostnames
+# -----------------------------------------------------------------------------
+configure_coredns_internal_hosts() {
+    echo -e "\n${YELLOW}>>> Configuring CoreDNS internal host resolution...${NC}"
+    
+    # Load domain from config
+    local config_file="$SCRIPT_DIR/config.env"
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${YELLOW}⚠ config.env not found, skipping CoreDNS configuration${NC}"
+        return 0
+    fi
+    source "$config_file"
+    
+    if [[ -z "${DOMAIN:-}" ]]; then
+        echo -e "${YELLOW}⚠ DOMAIN not set in config.env, skipping CoreDNS configuration${NC}"
+        return 0
+    fi
+    
+    # Get Keycloak ClusterIP (if installed)
+    local keycloak_ip
+    keycloak_ip=$(kubectl get svc keycloak -n security -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+    
+    if [[ -z "$keycloak_ip" ]]; then
+        echo -e "${YELLOW}⚠ Keycloak service not found, skipping CoreDNS hosts entry${NC}"
+        return 0
+    fi
+    
+    # Check if entry already exists in NodeHosts
+    local current_hosts
+    current_hosts=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.NodeHosts}' 2>/dev/null || echo "")
+    
+    local auth_hostname="auth.${DOMAIN}"
+    
+    if echo "$current_hosts" | grep -q "$auth_hostname"; then
+        echo -e "${GREEN}✓ CoreDNS already configured for ${auth_hostname}${NC}"
+        return 0
+    fi
+    
+    # Add entry to NodeHosts
+    echo -e "${YELLOW}Adding ${auth_hostname} → ${keycloak_ip} to CoreDNS...${NC}"
+    
+    local new_hosts="${current_hosts}
+${keycloak_ip} ${auth_hostname}"
+    
+    # Patch the ConfigMap
+    kubectl patch configmap coredns -n kube-system --type=merge -p "{\"data\":{\"NodeHosts\":\"${new_hosts}\"}}"
+    
+    # Restart CoreDNS to pick up changes
+    kubectl rollout restart deployment coredns -n kube-system
+    kubectl rollout status deployment coredns -n kube-system --timeout=60s
+    
+    echo -e "${GREEN}✓ CoreDNS configured: ${auth_hostname} → ${keycloak_ip}${NC}"
+    echo -e "${YELLOW}  Pods can now reach Keycloak via ${auth_hostname} internally${NC}"
+}
+
+# -----------------------------------------------------------------------------
 # Install Redis (for rate limiting & caching)
 # -----------------------------------------------------------------------------
 install_redis() {
@@ -730,6 +787,7 @@ main() {
     install_postgresql
     create_keycloak_database  # Create Keycloak DB after PostgreSQL is ready
     install_keycloak
+    configure_coredns_internal_hosts  # Fix hairpin NAT for auth.<domain>
     install_prometheus
     install_grafana
     install_redis

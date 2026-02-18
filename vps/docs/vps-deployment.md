@@ -24,7 +24,15 @@ chmod +x vps/install.sh
 sudo ./vps/install.sh
 ```
 
-> Installe : K3s, Helm, PostgreSQL, Redis, Keycloak, Prometheus, Grafana, ArgoCD, Sealed Secrets
+> Installe : K3s, Helm, Gateway API (NGINX Gateway Fabric), PostgreSQL, Redis, Keycloak, Prometheus, Grafana, ArgoCD,
+> Sealed Secrets
+
+**Variables importantes dans `config.env` :**
+
+- `DOMAIN` : ton domaine (ex: `example.com`)
+- `LETSENCRYPT_EMAIL` : email pour Let's Encrypt
+- `SCM_ORGANIZATION` : ton organisation GitHub/GitLab
+- `REGISTRY_BASE` : base URL de ton registry (ex: `ghcr.io/your-org`)
 
 ### 2. Configurer TLS (cert-manager)
 
@@ -53,10 +61,22 @@ sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
 ### 6. Onboarder une application
 
 ```bash
+# Avec subdomains par défaut (alpha.domain, app.domain)
 sudo ./vps/scripts/onboard-app.sh <app-name>
+
+# Avec subdomains personnalisés
+SUBDOMAIN_ALPHA=staging SUBDOMAIN_PROD=www sudo ./vps/scripts/onboard-app.sh <app-name>
+
+# Sans configuration Gateway (si déjà fait manuellement)
+SKIP_GATEWAY=true sudo ./vps/scripts/onboard-app.sh <app-name>
 ```
 
-> Crée : namespaces `<app>-alpha` et `<app>-prod`, databases PostgreSQL, credentials
+> Crée automatiquement :
+> - Namespaces `<app>-alpha` et `<app>-prod` avec ResourceQuotas
+> - Databases PostgreSQL séparées par environnement
+> - Certificats TLS (Let's Encrypt HTTP-01)
+> - Listeners HTTPS sur le Gateway
+> - Secrets GHCR et ServiceAccounts CI/CD
 
 ### 7. Exporter le certificat Sealed Secrets
 
@@ -136,10 +156,13 @@ ssh -L 8080:localhost:8080 ubuntu@<VPS_IP> "sudo kubectl port-forward -n securit
 
 ### URLs publiques (Gateway API)
 
-| Service        | URL                                    |
-|----------------|----------------------------------------|
-| Keycloak OAuth | `https://auth.yourdomain.com/realms/*` |
-| Votre app      | `https://app.yourdomain.com`           |
+| Service        | URL                                    | Notes                        |
+|----------------|----------------------------------------|------------------------------|
+| Keycloak OAuth | `https://auth.yourdomain.com/realms/*` | /admin bloqué (port-forward) |
+| App Alpha      | `https://alpha.yourdomain.com`         | Environnement staging        |
+| App Prod       | `https://app.yourdomain.com`           | Environnement production     |
+
+> **Note** : Les certificats sont émis par Let's Encrypt via HTTP-01 challenge (pas de wildcard).
 
 ---
 
@@ -153,6 +176,70 @@ sudo ./vps/scripts/export-secrets.sh show
 sudo ./vps/scripts/export-secrets.sh show grafana
 sudo ./vps/scripts/export-secrets.sh show keycloak
 sudo ./vps/scripts/export-secrets.sh show argocd
+```
+
+---
+
+## ArgoCD Auto-Discovery
+
+L'installation configure automatiquement l'auto-découverte des applications via ApplicationSets.
+
+### Fonctionnement
+
+1. ArgoCD scanne ton organisation GitHub/GitLab
+2. Les repos avec un dossier `helm/` sont détectés automatiquement
+3. Deux Applications sont créées : `<repo>-alpha` (branche develop) et `<repo>-prod` (branche main)
+
+### Prérequis pour un repo
+
+Structure attendue :
+
+```
+<repo>/
+  helm/
+    <repo>/
+      Chart.yaml
+      values.yaml
+      values-alpha.yaml
+      values-prod.yaml
+      templates/
+```
+
+### Vérification
+
+```bash
+# Voir les ApplicationSets
+kubectl get applicationsets -n argocd
+
+# Voir les Applications générées
+kubectl get applications -n argocd
+
+# Logs du controller
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controller --tail=50
+```
+
+### Problèmes fréquents
+
+**"generated 0 applications"** :
+
+- Vérifier que le dossier `helm/` existe dans le repo
+- Le token SCM doit avoir accès au repo (scope `repo` ou `Contents: read`)
+- Le filtre utilise `pathsExist: ["helm"]` (les globs ne sont PAS supportés)
+
+**"Secret scm-token not found"** :
+
+```bash
+sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
+```
+
+**"Unable to resolve issuer" / "Connection refused" sur Keycloak** :
+Le hairpin NAT empêche les pods d'atteindre `auth.<domain>` via l'IP externe.
+Cela est résolu automatiquement par `configure_coredns_internal_hosts()` dans install.sh.
+
+Si nécessaire, vérifier CoreDNS :
+
+```bash
+kubectl get configmap coredns -n kube-system -o yaml | grep NodeHosts -A5
 ```
 
 ---
@@ -177,10 +264,34 @@ kubectl logs -n cert-manager deploy/cert-manager
 ### Gateway API issues
 
 ```bash
+# État du Gateway et listeners
 kubectl get gateways -n nginx-gateway
 kubectl describe gateway infrastructure-gateway -n nginx-gateway
+
+# HTTPRoutes
 kubectl get httproutes -A
+
+# Pods NGINX (data plane)
+kubectl get pods -n nginx-gateway
+kubectl logs -n nginx-gateway -l app.kubernetes.io/name=nginx-gateway-fabric
 ```
+
+### Certificat bloqué en Pending
+
+```bash
+# Vérifier l'état
+kubectl get certificates -n nginx-gateway
+kubectl describe certificate <name> -n nginx-gateway
+
+# Vérifier les challenges HTTP-01
+kubectl get challenges -A
+kubectl describe challenge <name> -n nginx-gateway
+
+# Logs cert-manager
+kubectl logs -n cert-manager deploy/cert-manager --tail=50
+```
+
+> **Cause fréquente** : DNS pas encore propagé ou port 80 bloqué.
 
 ---
 

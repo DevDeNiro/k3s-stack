@@ -37,9 +37,11 @@ spec:
                         key: token
                     allBranches: false
                 cloneProtocol: https
+                # IMPORTANT: SCM provider does NOT support glob patterns in pathsExist
+                # Use 'helm' directory check, the helm chart path is derived from repo name
                 filters:
                     -   pathsExist:
-                            - helm/*/values-alpha.yaml
+                            - helm
 
     # Allow Image Updater to modify helm parameters without being reverted
     ignoreApplicationDifferences:
@@ -104,9 +106,11 @@ spec:
                         key: token
                     allBranches: false
                 cloneProtocol: https
+                # IMPORTANT: SCM provider does NOT support glob patterns in pathsExist
+                # Use 'helm' directory check, the helm chart path is derived from repo name
                 filters:
                     -   pathsExist:
-                            - helm/*/values-prod.yaml
+                            - helm
 
     # Allow Image Updater to modify helm parameters without being reverted
     ignoreApplicationDifferences:

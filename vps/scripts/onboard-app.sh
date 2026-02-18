@@ -395,6 +395,68 @@ EOF
 }
 
 # =============================================================================
+# Create ArgoCD repository secret for private repo access
+# This allows ArgoCD to clone the app repository
+# =============================================================================
+create_argocd_repo_secret() {
+    echo -e "${YELLOW}>>> Creating ArgoCD repository secret for ${APP_NAME}...${NC}"
+    
+    # Check if github-repo-creds exists (contains the token)
+    local token
+    token=$(kubectl get secret github-repo-creds -n argocd -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
+    
+    if [[ -z "$token" ]]; then
+        # Try scm-token as fallback
+        token=$(kubectl get secret scm-token -n argocd -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+    fi
+    
+    if [[ -z "$token" ]]; then
+        echo -e "${YELLOW}⚠ No SCM token found. ArgoCD may not be able to access private repos.${NC}"
+        echo -e "${YELLOW}  Run: sudo ./vps/scripts/export-secrets.sh set-scm-credentials github${NC}"
+        return 0
+    fi
+    
+    # Determine SCM provider and org from config
+    local scm_provider="${SCM_PROVIDER:-github}"
+    local scm_org="${SCM_ORGANIZATION:-}"
+    
+    if [[ -z "$scm_org" ]]; then
+        echo -e "${YELLOW}⚠ SCM_ORGANIZATION not set in config.env, skipping repo secret${NC}"
+        return 0
+    fi
+    
+    # Build repo URL
+    local repo_url
+    if [[ "$scm_provider" == "github" ]]; then
+        repo_url="https://github.com/${scm_org}/${APP_NAME}.git"
+    else
+        repo_url="https://gitlab.com/${scm_org}/${APP_NAME}.git"
+    fi
+    
+    local secret_name="repo-${APP_NAME}"
+    
+    # Check if secret already exists
+    if kubectl get secret "$secret_name" -n argocd &>/dev/null; then
+        echo -e "${GREEN}✓ Repository secret ${secret_name} already exists${NC}"
+        return 0
+    fi
+    
+    # Create repository secret
+    kubectl create secret generic "$secret_name" -n argocd \
+        --from-literal=type=git \
+        --from-literal=url="$repo_url" \
+        --from-literal=username=git \
+        --from-literal=password="$token"
+    
+    # Label it for ArgoCD to recognize
+    kubectl label secret "$secret_name" -n argocd \
+        argocd.argoproj.io/secret-type=repository
+    
+    echo -e "${GREEN}✓ Repository secret created: ${secret_name}${NC}"
+    echo -e "${YELLOW}  ArgoCD can now access: ${repo_url}${NC}"
+}
+
+# =============================================================================
 # Setup Gateway TLS (certificates + HTTPS listeners)
 # =============================================================================
 setup_gateway_tls() {
@@ -562,6 +624,7 @@ main() {
     create_namespaces
     create_database
     create_ghcr_secret
+    create_argocd_repo_secret  # Allow ArgoCD to clone private repo
     create_cicd_access
     setup_gateway_tls
     print_summary
