@@ -20,7 +20,6 @@ metadata:
 spec:
     # Controller name must match the NGINX Gateway Fabric controller
     controllerName: gateway.nginx.org/nginx-gateway-controller
-
     # Description max 64 chars
     description: "NGINX Gateway Fabric for k3s-stack VPS"
 
