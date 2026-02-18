@@ -334,7 +334,7 @@ spec:
     parentRefs:
         - name: infrastructure-gateway
           namespace: nginx-gateway
-          sectionName: http
+          sectionName: http-wildcard
     hostnames:
         - "*.${DOMAIN}"
     rules:
@@ -346,6 +346,61 @@ spec:
 EOF
     
     echo -e "${GREEN}✓ HTTPS redirect HTTPRoute created${NC}"
+}
+
+# -----------------------------------------------------------------------------
+# Create TLS Certificates (HTTP-01 challenge - per hostname, not wildcard)
+# -----------------------------------------------------------------------------
+create_certificates() {
+    if [[ "$ENABLE_TLS" != true ]]; then
+        return 0
+    fi
+    
+    echo -e "\n${YELLOW}>>> Creating TLS certificates (HTTP-01)...${NC}"
+    
+    local domain_slug
+    domain_slug=$(echo "$DOMAIN" | tr '.' '-')
+    
+    # Certificate for auth.domain (Keycloak)
+    cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+    name: tls-auth-${domain_slug}
+    namespace: nginx-gateway
+    labels:
+        app.kubernetes.io/managed-by: k3s-vps
+spec:
+    secretName: tls-auth-${domain_slug}
+    issuerRef:
+        name: letsencrypt-prod
+        kind: ClusterIssuer
+    dnsNames:
+        - "auth.${DOMAIN}"
+EOF
+    
+    echo -e "${GREEN}✓ Certificate created for auth.${DOMAIN}${NC}"
+    
+    # Wait for certificate to be ready (with timeout)
+    echo -e "${YELLOW}Waiting for certificate to be issued (this may take 1-2 minutes)...${NC}"
+    local timeout=120
+    local elapsed=0
+    while [[ $elapsed -lt $timeout ]]; do
+        local ready
+        ready=$(kubectl get certificate tls-auth-${domain_slug} -n nginx-gateway -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+        if [[ "$ready" == "True" ]]; then
+            echo -e "${GREEN}✓ Certificate issued successfully${NC}"
+            return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+        echo -ne "\r  Waiting... ${elapsed}s / ${timeout}s"
+    done
+    
+    echo -e "\n${YELLOW}⚠ Certificate not ready yet. Check status with:${NC}"
+    echo -e "  ${BLUE}kubectl get certificates -A${NC}"
+    echo -e "  ${BLUE}kubectl describe certificate tls-auth-${domain_slug} -n nginx-gateway${NC}"
+    echo -e "  ${BLUE}kubectl get challenges -A${NC}"
 }
 
 # -----------------------------------------------------------------------------
@@ -421,7 +476,8 @@ main() {
     
     check_prerequisites
     install_cert_manager
-    create_infrastructure_gateway
+    create_infrastructure_gateway  # Gateway first (HTTP listeners needed for HTTP-01 challenge)
+    create_certificates            # Create TLS certificates AFTER Gateway exists
     create_keycloak_httproute
     create_https_redirect
     print_summary

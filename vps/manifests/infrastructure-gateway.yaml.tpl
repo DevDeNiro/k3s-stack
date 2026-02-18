@@ -5,6 +5,9 @@
 # This Gateway is managed by k3s-stack platform and shared by all applications.
 # Applications attach their HTTPRoutes to this Gateway via parentRefs.
 #
+# TLS Strategy: Per-hostname certificates (not wildcard) for HTTP-01 compatibility
+# Certificates are created separately via cert-manager Certificate resources.
+#
 # Generated from template. Do not edit directly.
 # Edit vps/config.env and run: ./vps/scripts/apply-config.sh
 # =============================================================================
@@ -19,15 +22,14 @@ metadata:
         app.kubernetes.io/name: infrastructure-gateway
         app.kubernetes.io/component: gateway
         app.kubernetes.io/managed-by: k3s-vps
-    annotations:
-        # cert-manager will automatically create Certificate resources
-        # for each listener with TLS configuration
-        cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
     gatewayClassName: nginx
     listeners:
-        # HTTP listener - redirects to HTTPS or serves HTTP-01 challenges
-        - name: http
+        # =================================================================
+        # HTTP Listeners (port 80)
+        # Used for: HTTP-01 ACME challenges, HTTP to HTTPS redirects
+        # =================================================================
+        - name: http-wildcard
           port: 80
           protocol: HTTP
           hostname: "*.{{DOMAIN}}"
@@ -35,16 +37,30 @@ spec:
               namespaces:
                   from: All
         
-        # HTTPS listener - main TLS termination point
-        - name: https
+        - name: http-apex
+          port: 80
+          protocol: HTTP
+          hostname: "{{DOMAIN}}"
+          allowedRoutes:
+              namespaces:
+                  from: All
+        
+        # =================================================================
+        # HTTPS Listeners (port 443)
+        # Each hostname needs its own listener with its certificate
+        # Add more listeners as you onboard applications
+        # =================================================================
+        
+        # Auth service (Keycloak)
+        - name: https-auth
           port: 443
           protocol: HTTPS
-          hostname: "*.{{DOMAIN}}"
+          hostname: "auth.{{DOMAIN}}"
           tls:
               mode: Terminate
               certificateRefs:
                   - kind: Secret
-                    name: wildcard-tls-{{DOMAIN_SLUG}}
+                    name: tls-auth-{{DOMAIN_SLUG}}
           allowedRoutes:
               namespaces:
                   from: All
