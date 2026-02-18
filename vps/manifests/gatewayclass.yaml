@@ -21,10 +21,8 @@ spec:
     # Controller name must match the NGINX Gateway Fabric controller
     controllerName: gateway.nginx.org/nginx-gateway-controller
 
-    # Optional: Description for this GatewayClass
-    description: |
-        NGINX Gateway Fabric - Production-ready Gateway API implementation.
-        Used for ingress traffic routing in k3s-stack VPS deployments.
+    # Description max 64 chars
+    description: "NGINX Gateway Fabric for k3s-stack VPS"
 
     # Optional: Parameters for controller-specific configuration
     # parametersRef:
