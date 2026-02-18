@@ -119,14 +119,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow from ingress-nginx (legacy)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
-      ports:
-        - protocol: TCP
-          port: 8080
     # Allow from nginx-gateway (Gateway API)
     - from:
         - namespaceSelector:
@@ -199,14 +191,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow from ingress-nginx (legacy)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
-      ports:
-        - protocol: TCP
-          port: 9090
     # Allow from nginx-gateway (Gateway API)
     - from:
         - namespaceSelector:
@@ -260,14 +244,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow from ingress-nginx (legacy)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
-      ports:
-        - protocol: TCP
-          port: 3000
     # Allow from nginx-gateway (Gateway API)
     - from:
         - namespaceSelector:
@@ -322,14 +298,6 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Allow from ingress-nginx (legacy)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
-      ports:
-        - protocol: TCP
-          port: 8080
     # Allow from nginx-gateway (Gateway API)
     - from:
         - namespaceSelector:

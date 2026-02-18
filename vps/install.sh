@@ -188,7 +188,6 @@ setup_helm_repos() {
     helm repo add bitnami https://charts.bitnami.com/bitnami
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo add grafana https://grafana.github.io/helm-charts
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
     helm repo add argo https://argoproj.github.io/argo-helm
     helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
     
@@ -212,33 +211,7 @@ create_namespaces() {
 }
 
 # -----------------------------------------------------------------------------
-# Install Ingress NGINX
-# -----------------------------------------------------------------------------
-install_ingress() {
-    echo -e "\n${YELLOW}>>> Installing Ingress NGINX...${NC}"
-    
-    # Use hostNetwork to bind directly to ports 80/443 on the node
-    # This is required because servicelb is disabled and NodePort range is 30000-32767
-    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-        --namespace ingress-nginx \
-        --create-namespace \
-        --set controller.kind=DaemonSet \
-        --set controller.hostNetwork=true \
-        --set controller.dnsPolicy=ClusterFirstWithHostNet \
-        --set controller.service.type=ClusterIP \
-        --set controller.resources.requests.memory=128Mi \
-        --set controller.resources.requests.cpu=100m \
-        --set controller.resources.limits.memory=256Mi \
-        --set controller.resources.limits.cpu=200m \
-        --set controller.admissionWebhooks.enabled=false \
-        --set controller.ingressClassResource.default=true \
-        --wait --timeout 5m
-    
-    echo -e "${GREEN}✓ Ingress NGINX installed (hostNetwork mode)${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Install Gateway API (successor to Ingress)
+# Install Gateway API (using NGINX Gateway Fabric)
 # Uses NGINX Gateway Fabric as the controller implementation
 # -----------------------------------------------------------------------------
 install_gateway_api() {
@@ -648,10 +621,7 @@ print_summary() {
     kubectl get nodes
     
     echo -e "\n${YELLOW}Services per namespace:${NC}"
-    local namespaces="storage database security monitoring ingress-nginx argocd"
-    if [[ "$INSTALL_GATEWAY_API" == "true" ]]; then
-        namespaces="$namespaces nginx-gateway"
-    fi
+    local namespaces="storage database security monitoring nginx-gateway argocd"
     for ns in $namespaces; do
         echo -e "\n${BLUE}[$ns]${NC}"
         kubectl get pods -n $ns 2>/dev/null || echo "  (empty)"
@@ -756,8 +726,7 @@ main() {
     setup_helm_repos
     create_namespaces
     setup_secrets          # Generate and create K8s secrets BEFORE installing services
-    install_ingress
-    install_gateway_api    # Gateway API (optional, set INSTALL_GATEWAY_API=true)
+    install_gateway_api    # Gateway API with NGINX Gateway Fabric
     install_postgresql
     create_keycloak_database  # Create Keycloak DB after PostgreSQL is ready
     install_keycloak

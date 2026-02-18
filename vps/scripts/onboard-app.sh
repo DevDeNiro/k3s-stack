@@ -27,6 +27,12 @@ SECRETS_FILE="${SECRETS_DIR}/credentials.env"
 # =============================================================================
 APP_NAME="${1:-}"
 SKIP_DATABASE="${SKIP_DATABASE:-false}"
+SKIP_GATEWAY="${SKIP_GATEWAY:-false}"
+
+# Subdomain overrides (optional)
+# Default: alpha.<domain> for alpha env, app.<domain> for prod env
+SUBDOMAIN_ALPHA="${SUBDOMAIN_ALPHA:-alpha}"
+SUBDOMAIN_PROD="${SUBDOMAIN_PROD:-app}"
 
 # =============================================================================
 # Usage
@@ -47,6 +53,7 @@ usage() {
     echo ""
 echo "Example:"
     echo "  $0 myapp"
+    echo "  SUBDOMAIN_ALPHA=preview SUBDOMAIN_PROD=www $0 myapp"
 }
 
 # =============================================================================
@@ -61,6 +68,27 @@ if [[ ! "$APP_NAME" =~ ^[a-z0-9-]+$ ]]; then
     echo -e "${RED}Error: App name must be lowercase alphanumeric with hyphens only${NC}"
     exit 1
 fi
+
+# =============================================================================
+# Load config.env for domain and other settings
+# =============================================================================
+load_config() {
+    local config_file
+    config_file="$(dirname "$SCRIPT_DIR")/config.env"
+    
+    if [[ -f "$config_file" ]]; then
+        source "$config_file"
+        echo -e "${GREEN}✓ Config loaded from $config_file${NC}"
+    else
+        echo -e "${RED}Error: config.env not found at $config_file${NC}"
+        exit 1
+    fi
+    
+    if [[ -z "${DOMAIN:-}" ]]; then
+        echo -e "${RED}Error: DOMAIN not set in config.env${NC}"
+        exit 1
+    fi
+}
 
 # =============================================================================
 # Load infrastructure secrets
@@ -367,6 +395,110 @@ EOF
 }
 
 # =============================================================================
+# Setup Gateway TLS (certificates + HTTPS listeners)
+# =============================================================================
+setup_gateway_tls() {
+    if [[ "$SKIP_GATEWAY" == "true" ]]; then
+        echo -e "${YELLOW}>>> Skipping Gateway TLS setup${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}>>> Setting up Gateway TLS for ${APP_NAME}...${NC}"
+    
+    local domain_slug
+    domain_slug=$(echo "$DOMAIN" | tr '.' '-')
+    
+    # Create certificates and listeners for each environment
+    for env in alpha prod; do
+        local subdomain
+        if [[ "$env" == "alpha" ]]; then
+            subdomain="$SUBDOMAIN_ALPHA"
+        else
+            subdomain="$SUBDOMAIN_PROD"
+        fi
+        
+        local hostname="${subdomain}.${DOMAIN}"
+        local cert_name="tls-${subdomain}-${domain_slug}"
+        local listener_name="https-${subdomain}"
+        
+        echo -e "${YELLOW}>>> Creating certificate for ${hostname}...${NC}"
+        
+        # Check if certificate already exists
+        if kubectl get certificate "$cert_name" -n nginx-gateway &>/dev/null; then
+            echo -e "${GREEN}✓ Certificate ${cert_name} already exists${NC}"
+        else
+            # Create certificate
+            cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+    name: ${cert_name}
+    namespace: nginx-gateway
+    labels:
+        app.kubernetes.io/managed-by: k3s-stack
+        app.kubernetes.io/app: ${APP_NAME}
+spec:
+    secretName: ${cert_name}
+    issuerRef:
+        name: letsencrypt-prod
+        kind: ClusterIssuer
+    dnsNames:
+        - "${hostname}"
+EOF
+            echo -e "${GREEN}✓ Certificate created for ${hostname}${NC}"
+            
+            # Wait for certificate to be ready
+            echo -e "${YELLOW}Waiting for certificate (max 120s)...${NC}"
+            local timeout=120
+            local elapsed=0
+            while [[ $elapsed -lt $timeout ]]; do
+                local ready
+                ready=$(kubectl get certificate "$cert_name" -n nginx-gateway -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+                if [[ "$ready" == "True" ]]; then
+                    echo -e "${GREEN}✓ Certificate issued${NC}"
+                    break
+                fi
+                sleep 5
+                elapsed=$((elapsed + 5))
+            done
+        fi
+        
+        # Check if listener already exists
+        local existing_listener
+        existing_listener=$(kubectl get gateway infrastructure-gateway -n nginx-gateway -o jsonpath="{.spec.listeners[?(@.name=='${listener_name}')].name}" 2>/dev/null || true)
+        
+        if [[ -n "$existing_listener" ]]; then
+            echo -e "${GREEN}✓ Listener ${listener_name} already exists${NC}"
+        else
+            echo -e "${YELLOW}>>> Adding HTTPS listener for ${hostname}...${NC}"
+            
+            # Add HTTPS listener to Gateway
+            kubectl patch gateway infrastructure-gateway -n nginx-gateway --type='json' -p="[
+              {
+                \"op\": \"add\",
+                \"path\": \"/spec/listeners/-\",
+                \"value\": {
+                  \"name\": \"${listener_name}\",
+                  \"port\": 443,
+                  \"protocol\": \"HTTPS\",
+                  \"hostname\": \"${hostname}\",
+                  \"tls\": {
+                    \"mode\": \"Terminate\",
+                    \"certificateRefs\": [{\"kind\": \"Secret\", \"name\": \"${cert_name}\"}]
+                  },
+                  \"allowedRoutes\": {\"namespaces\": {\"from\": \"All\"}}
+                }
+              }
+            ]"
+            
+            echo -e "${GREEN}✓ Listener added for ${hostname}${NC}"
+        fi
+    done
+    
+    echo -e "${GREEN}✓ Gateway TLS setup complete${NC}"
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 print_summary() {
@@ -378,6 +510,12 @@ print_summary() {
     
     echo -e "\n${YELLOW}Namespaces:${NC} ${APP_NAME}-prod, ${APP_NAME}-alpha"
     echo -e "${YELLOW}Database:${NC} ${APP_NAME} (PostgreSQL)"
+    
+    if [[ "$SKIP_GATEWAY" != "true" && -n "${DOMAIN:-}" ]]; then
+        echo -e "\n${YELLOW}Gateway TLS:${NC}"
+        echo -e "  • https://${SUBDOMAIN_ALPHA}.${DOMAIN} → ${APP_NAME}-alpha"
+        echo -e "  • https://${SUBDOMAIN_PROD}.${DOMAIN} → ${APP_NAME}-prod"
+    fi
     
     echo -e "\n${YELLOW}Secrets in each namespace:${NC}"
     echo -e "  • ${APP_NAME}-db   → host, port, database, username, password"
@@ -419,11 +557,13 @@ main() {
     : > "$APP_SECRETS_FILE"
     chmod 600 "$APP_SECRETS_FILE"  # Only root can read
     
+    load_config
     load_secrets
     create_namespaces
     create_database
     create_ghcr_secret
     create_cicd_access
+    setup_gateway_tls
     print_summary
 }
 

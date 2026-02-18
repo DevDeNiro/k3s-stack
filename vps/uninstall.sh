@@ -99,8 +99,8 @@ confirm_uninstall() {
     fi
     
     echo -e "\n${YELLOW}This will remove the following:${NC}"
-    echo -e "  - All Helm releases (grafana, prometheus, keycloak, postgresql, ingress-nginx, postgres-backup)"
-    echo -e "  - Namespaces: storage, security, monitoring, ingress-nginx"
+    echo -e "  - All Helm releases (grafana, prometheus, keycloak, postgresql, nginx-gateway, postgres-backup)"
+    echo -e "  - Namespaces: storage, security, monitoring, nginx-gateway"
     
     if [[ "$REMOVE_SECRETS" == "true" ]]; then
         echo -e "  - Local secrets: ${SECRETS_DIR}/"
@@ -157,7 +157,7 @@ uninstall_helm_releases() {
         "grafana:monitoring"
         "prometheus:monitoring"
         "postgresql:storage"
-        "ingress-nginx:ingress-nginx"
+        "nginx-gateway:nginx-gateway"
     )
     
     for release_ns in "${releases[@]}"; do
@@ -212,7 +212,7 @@ remove_pvcs() {
 remove_namespaces() {
     echo -e "\n${YELLOW}>>> Removing namespaces...${NC}"
     
-    local namespaces=("storage" "security" "monitoring" "ingress-nginx")
+    local namespaces=("storage" "security" "monitoring" "nginx-gateway")
     
     for ns in "${namespaces[@]}"; do
         if kubectl get namespace "$ns" &> /dev/null 2>&1; then
@@ -235,7 +235,7 @@ remove_helm_repos() {
         return 0
     fi
     
-    local repos=("bitnami" "prometheus-community" "grafana" "ingress-nginx")
+    local repos=("bitnami" "prometheus-community" "grafana")
     
     for repo in "${repos[@]}"; do
         if helm repo list 2>/dev/null | grep -q "^$repo"; then
