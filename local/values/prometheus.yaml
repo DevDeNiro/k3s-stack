@@ -1,0 +1,35 @@
+server:
+    persistentVolume:
+        enabled: true
+        size: 8Gi
+    resources:
+        limits:
+            cpu: 500m
+            memory: 512Mi
+        requests:
+            cpu: 200m
+            memory: 256Mi
+    securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        runAsGroup: 1000
+        fsGroup: 1000
+
+alertmanager:
+    enabled: true
+    persistentVolume:
+        enabled: true
+        size: 2Gi
+
+pushgateway:
+    enabled: true
+
+nodeExporter:
+    enabled: true
+
+kubeStateMetrics:
+    enabled: true
+
+serviceAccounts:
+    server:
+        create:

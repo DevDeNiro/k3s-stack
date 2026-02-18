@@ -1,0 +1,75 @@
+global:
+    storageClass: ""
+
+image:
+    registry: docker.io
+    repository: bitnami/kafka
+    tag: latest
+    pullPolicy: IfNotPresent
+
+resources:
+    limits:
+        cpu: 500m
+        memory: 1Gi
+    requests:
+        cpu: 250m
+        memory: 512Mi
+
+kraft:
+    enabled: true
+    clusterId: "kafka-cluster-local"
+
+zookeeper:
+    enabled: false
+
+controller:
+    replicaCount: 1
+    persistence:
+        enabled: true
+        size: 8Gi
+
+broker:
+    replicaCount: 1
+    persistence:
+        enabled: true
+        size: 8Gi
+
+listeners:
+    client:
+        name: CLIENT
+        port: 9092
+        protocol: PLAINTEXT
+    interbroker:
+        name: INTERNAL
+        port: 9094
+        protocol: PLAINTEXT
+    external:
+        name: EXTERNAL
+        port: 9095
+        protocol: PLAINTEXT
+
+externalAccess:
+    enabled: true
+    autoDiscovery:
+        enabled: true
+    broker:
+        service:
+            type: NodePort
+            nodePorts:
+                - 30092
+    controller:
+        service:
+            type: NodePort
+            nodePorts:
+                - 30093
+    rbac:
+        create: true
+
+extraConfig: |
+    auto.create.topics.enable=true
+    delete.topic.enable=true
+    num.partitions=3
+    default.replication.factor=1
+    log.retention.hours=24
+    log.retention.bytes=1073741824
+    security.inter.broker.protocol=PLAINTEXT

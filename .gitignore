@@ -1,0 +1,18 @@
+# Generated credentials
+*_password.txt
+dashboard_token.txt
+
+.DS_Store
+
+# Local configuration (contains real values)
+vps/config.env
+
+# Runtime files
+dashboard_port_forward.log
+dashboard_portforward.pid
+
+# IDE
+*.iml
+.idea/
+
+kubeseal--linux-amd64.tar.gz

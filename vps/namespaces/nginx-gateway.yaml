@@ -1,0 +1,18 @@
+# =============================================================================
+# NGINX Gateway Fabric Namespace
+# Gateway API controller for ingress traffic (replacement for ingress-nginx)
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: nginx-gateway
+    labels:
+        app.kubernetes.io/name: nginx-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/managed-by: k3s-vps
+        # PSA: baseline for gateway controller (needs hostNetwork for ports 80/443)
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted

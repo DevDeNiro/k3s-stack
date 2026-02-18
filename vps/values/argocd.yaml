@@ -1,0 +1,134 @@
+# =============================================================================
+# Argo CD Minimal Configuration for VPS (4-6GB RAM)
+# Optimized for low memory footprint
+# =============================================================================
+
+# Global configuration
+global:
+    # Disable network policies (handled separately if needed)
+    networkPolicy:
+        create: false
+
+# Argo CD Server
+server:
+    # Resource limits (minimal for VPS)
+    resources:
+        requests:
+            memory: "128Mi"
+            cpu: "50m"
+        limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+    # Service configuration
+    service:
+        type: ClusterIP
+
+    # Ingress (disabled by default - configure via setup-ingress.sh)
+    ingress:
+        enabled: false
+        # Enable after installation:
+        # ingressClassName: nginx
+        # hosts:
+        #   - argocd.yourdomain.com
+        # tls:
+        #   - secretName: argocd-tls
+        #     hosts:
+        #       - argocd.yourdomain.com
+
+    # Extra args for insecure mode (TLS terminated at ingress)
+    extraArgs:
+        - --insecure
+
+# Argo CD Repo Server
+repoServer:
+    resources:
+        requests:
+            memory: "128Mi"
+            cpu: "50m"
+        limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+# Argo CD Application Controller
+controller:
+    resources:
+        requests:
+            memory: "256Mi"
+            cpu: "100m"
+        limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+# Redis (used by Argo CD for caching)
+redis:
+    resources:
+        requests:
+            memory: "64Mi"
+            cpu: "25m"
+        limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+# Dex (SSO - disabled to save resources, can enable later)
+dex:
+    enabled: false
+
+# Notifications controller (disabled to save resources)
+notifications:
+    enabled: false
+
+# ApplicationSet controller (required for auto-discovery)
+applicationSet:
+    enabled: true
+    resources:
+        requests:
+            memory: "64Mi"
+            cpu: "25m"
+        limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+# Configs
+configs:
+    # Argo CD ConfigMap
+    cm:
+        # Enable Helm
+        helm.enabled: "true"
+        # Status badge
+        statusbadge.enabled: "true"
+        # Application resync period (default 3m, increase to reduce load)
+        timeout.reconciliation: "180s"
+        # Resource tracking method
+        application.resourceTrackingMethod: "annotation"
+
+    # Argo CD RBAC configuration
+    rbac:
+        # Default policy for authenticated users
+        policy.default: role:readonly
+        # Admin policy (configure specific users/groups as needed)
+        policy.csv: |
+            g, admin, role:admin
+
+    # Repository credentials (configured via secrets)
+    repositories: { }
+
+    # Credential templates for GHCR
+    credentialTemplates:
+        ghcr-creds:
+            url: https://ghcr.io
+            # Password is set via secret
+
+    # Known hosts for SSH (GitHub, GitLab)
+    ssh:
+        knownHosts: |
+            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+            github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+            github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+            gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf
+            gitlab.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=
+            gitlab.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCsj2bNKTBSpIYDEGk9KxsGh3mySTRgMtXL583qmBpzeQ+jqCMRgBqB98u3z++J1sKlXHWfM9dyhSevkMwSbhoR8XIq/U0tCNyokEi/ueaBMCvbcTHhO7FcwzY92WK4 Voices0rWI5jLQI9NVaKWlfI7fyYXqOuLFvjb/K1PSZOs14pOo1ztMU6kcVc7B/mqhFYCjKJb/b6q6AI9ztK/Xto+2aDvrJQvS0dhHF6nGAW1O4JCq8a1xL+qYsjflObiMtvzEdKf7gZspVS5ApnrFLHeIN5FtJ9n9udRF5qB+Cw8OqeFXnA
+
+    # Argo CD secret (admin password managed via setup-secrets.sh)
+    secret:
+        createSecret: false  # We create it manually with setup-secrets.sh

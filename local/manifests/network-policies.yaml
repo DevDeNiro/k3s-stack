@@ -1,0 +1,212 @@
+# =============================================================================
+# Network Policies for proper network segmentation
+# Uses kubernetes.io/metadata.name (auto-populated by K8s) for namespace selection
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: storage-network-policy
+  namespace: storage
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from same namespace (storage)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: storage
+  # Allow connections from applications managed by k3s-stack/k3s-vps
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: k3s-vps
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: k3s-stack
+  # Keycloak (security ns) needs PostgreSQL
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: security
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow connections within storage namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: storage
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: security-network-policy
+  namespace: security
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from same namespace (security)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: security
+  # Allow connections from applications that need authentication
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: k3s-vps
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: k3s-stack
+  # Allow connections from ingress
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow connections to storage (PostgreSQL)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: storage
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow connections within security namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: security
+  # Allow external HTTPS (OIDC providers, LDAP, etc.)
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-network-policy
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from same namespace (monitoring)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+  # Allow connections from ingress for dashboard access
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  # Allow metrics scraping from all namespaces (Prometheus)
+  - from: []
+    ports:
+    - protocol: TCP
+      port: 9090  # Prometheus
+    - protocol: TCP
+      port: 3000  # Grafana
+    - protocol: TCP
+      port: 9100  # Node exporter
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow scraping metrics from all namespaces
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 8080  # Common metrics port (actuator)
+    - protocol: TCP
+      port: 9090  # Prometheus self-scrape
+    - protocol: TCP
+      port: 9100  # Node exporter
+    - protocol: TCP
+      port: 9187  # PostgreSQL exporter
+    - protocol: TCP
+      port: 9121  # Redis exporter
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-nginx-network-policy
+  namespace: ingress-nginx
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow external traffic (HTTP/HTTPS)
+  - ports:
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 443
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow connections to all app namespaces (backend services)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: k3s-vps
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: k3s-stack
+  # Allow to monitoring (Grafana dashboards)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+  # Allow to security (Keycloak)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: security

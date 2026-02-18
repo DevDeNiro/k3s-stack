@@ -1,0 +1,89 @@
+# =============================================================================
+# Publish Helm Charts to GHCR (OCI Registry)
+# =============================================================================
+# Publishes common-library chart to ghcr.io/devdeniro/k3s-stack/charts
+# Triggered on push to main when charts/ changes, or manually
+# =============================================================================
+
+name: Publish Helm Charts
+
+on:
+    push:
+        branches:
+            - main
+        paths:
+            - 'charts/**'
+            - '.github/workflows/publish-helm-charts.yml'
+    workflow_dispatch:
+        inputs:
+            chart:
+                description: 'Chart to publish (or "all")'
+                required: true
+                default: 'common-library'
+                type: choice
+                options:
+                    - common-library
+                    - all
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+    publish:
+        name: Publish Helm Charts
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+
+        steps:
+            -   name: Checkout repository
+                uses: actions/checkout@v4
+
+            -   name: Setup Helm
+                uses: azure/setup-helm@v4
+                with:
+                    version: 'v3.14.0'
+
+            -   name: Set lowercase owner
+                id: repo
+                run: |
+                    echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
+
+            -   name: Login to GHCR
+                run: |
+                    echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+                      --username ${{ github.actor }} \
+                      --password-stdin
+
+            -   name: Get chart version
+                id: chart-version
+                run: |
+                    VERSION=$(grep '^version:' charts/common-library/Chart.yaml | awk '{print $2}')
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                    echo "Chart version: $VERSION"
+
+            -   name: Package common-library
+                run: |
+                    helm package charts/common-library --destination .helm-packages/
+
+            -   name: Push common-library to GHCR
+                run: |
+                    helm push .helm-packages/common-library-${{ steps.chart-version.outputs.version }}.tgz \
+                      oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}
+
+            -   name: Summary
+                run: |
+                    echo "## 📦 Helm Chart Published" >> $GITHUB_STEP_SUMMARY
+                    echo "" >> $GITHUB_STEP_SUMMARY
+                    echo "| Chart | Version | Registry |" >> $GITHUB_STEP_SUMMARY
+                    echo "|-------|---------|----------|" >> $GITHUB_STEP_SUMMARY
+                    echo "| common-library | ${{ steps.chart-version.outputs.version }} | \`oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/common-library\` |" >> $GITHUB_STEP_SUMMARY
+                    echo "" >> $GITHUB_STEP_SUMMARY
+                    echo "### Usage in Chart.yaml" >> $GITHUB_STEP_SUMMARY
+                    echo '```yaml' >> $GITHUB_STEP_SUMMARY
+                    echo 'dependencies:' >> $GITHUB_STEP_SUMMARY
+                    echo '  - name: common-library' >> $GITHUB_STEP_SUMMARY
+                    echo '    version: "${{ steps.chart-version.outputs.version }}"' >> $GITHUB_STEP_SUMMARY
+                    echo '    repository: "oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}"' >> $GITHUB_STEP_SUMMARY
+                    echo '```' >> $GITHUB_STEP_SUMMARY

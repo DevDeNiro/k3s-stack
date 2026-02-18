@@ -1,0 +1,25 @@
+api:
+    resources:
+        requests:
+            cpu: 50m
+            memory: 128Mi
+    livenessProbe:
+        initialDelaySeconds: 90
+
+web:
+    resources:
+        requests:
+            cpu: 50m
+            memory: 64Mi
+    livenessProbe:
+        initialDelaySeconds: 90
+
+metricsScraper:
+    enabled: true
+
+cert-manager:
+    enabled: false
+    installCRDs: false
+
+metrics-server:
+    enabled: false

@@ -1,0 +1,18 @@
+# =============================================================================
+# GitOps Namespace
+# Argo CD and related GitOps tooling
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: argocd
+    labels:
+        app.kubernetes.io/name: argocd
+        app.kubernetes.io/component: gitops
+        app.kubernetes.io/managed-by: k3s-vps
+        # PSA: baseline required for Argo CD components
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted

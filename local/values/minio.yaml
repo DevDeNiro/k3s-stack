@@ -1,0 +1,74 @@
+## Common parameters
+mode: standalone  # standalone or distributed
+replicas: 1       # For dev environment, set to 1
+
+## MinIO server parameters
+## ref: https://github.com/bitnami/containers/tree/main/bitnami/minio#configuration
+service:
+    type: ClusterIP
+    port: 9000
+
+## MinIO console parameters
+consoleService:
+    type: ClusterIP
+    port: 9001
+
+## MinIO resources
+resources:
+    requests:
+        memory: 512Mi
+        cpu: 250m
+    limits:
+        memory: 1Gi
+        cpu: 500m
+
+## Enable persistence using Persistent Volume Claims
+persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+        - ReadWriteOnce
+    size: 10Gi
+    mountPath: /data
+    subPath: ""
+
+## Security context
+securityContext:
+    enabled: true
+    fsGroup: 1001
+    runAsUser: 1001
+
+## Create a bucket after MinIO installation
+defaultBuckets: "uploads,downloads,backups"
+
+## Configure API Gateway (S3 API)
+s3gateway:
+    enabled: false  # Set to true if you want MinIO to act as an S3 gateway
+
+## Use TLS for connections
+tls:
+    enabled: false  # Set to true for production
+
+## Configure service account
+serviceAccount:
+    create: true
+    annotations: { }
+    name: "minio"
+
+## Configure metrics and monitoring
+## Note: These settings will be controlled by the installation script
+## based on CRD availability
+metrics:
+    serviceMonitor:
+        enabled: false  # Will be set dynamically by install script
+        namespace: monitoring  # Prometheus namespace
+        interval: 30s
+        scrapeTimeout: 10s
+
+## Enable Prometheus endpoint and rules
+## Note: These settings will be controlled by the installation script
+prometheusRule:
+    enabled: false  # Will be set dynamically by install script
+    namespace: monitoring
+    # Rules will be added only if Prometheus Operator is available
+    rules: []

@@ -1,0 +1,13 @@
+apiVersion: v2
+name: postgres-backup
+description: PostgreSQL backup CronJob with pg_dump and 30-day retention
+type: application
+version: 1.0.0
+appVersion: "16"
+keywords:
+    - postgresql
+    - backup
+    - cronjob
+    - pg_dump
+maintainers:
+    -   name: k3s-vps

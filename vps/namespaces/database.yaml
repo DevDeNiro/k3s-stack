@@ -1,0 +1,18 @@
+# =============================================================================
+# Database Namespace
+# For shared database services (Redis, etc.)
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: database
+    labels:
+        app.kubernetes.io/name: database
+        app.kubernetes.io/component: infrastructure
+        app.kubernetes.io/managed-by: k3s-vps
+        # PSA: baseline for database services
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted

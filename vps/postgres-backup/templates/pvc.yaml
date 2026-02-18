@@ -1,0 +1,20 @@
+{{- if .Values.localStorage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-pvc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: postgres-backup
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.localStorage.storageSize }}
+  {{- if .Values.localStorage.storageClass }}
+  storageClassName: {{ .Values.localStorage.storageClass | quote }}
+  {{- end }}
+{{- end }}

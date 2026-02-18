@@ -1,0 +1,151 @@
+# =============================================================================
+# Grafana Minimal Configuration for VPS (4-6GB RAM)
+# Optimized for low memory footprint with Prometheus datasource
+# =============================================================================
+
+# Admin credentials - managed via Kubernetes Secret (created by setup-secrets.sh)
+admin:
+  existingSecret: grafana-secret
+  userKey: admin-user
+  passwordKey: admin-password
+
+# Resource limits
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "50m"
+  limits:
+    memory: "256Mi"
+    cpu: "200m"
+
+# Persistent storage
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClassName: ""
+
+# Security context
+securityContext:
+  runAsUser: 472
+  runAsGroup: 472
+  fsGroup: 472
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+
+# Ingress (configure host after deployment)
+ingress:
+  enabled: false
+  # Enable and configure after installation:
+  # hosts:
+  #   - grafana.yourdomain.com
+  # ingressClassName: nginx
+
+# Datasources auto-provisioning
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus-server.monitoring.svc.cluster.local
+        isDefault: true
+        editable: false
+        jsonData:
+          httpMethod: POST
+          manageAlerts: true
+          prometheusType: Prometheus
+
+# Dashboard providers
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+      # Add custom dashboard providers for your applications:
+      # - name: 'myapp'
+      #   orgId: 1
+      #   folder: 'MyApp'
+      #   type: file
+      #   disableDeletion: false
+      #   editable: true
+      #   options:
+      #     path: /var/lib/grafana/dashboards/myapp
+
+# Pre-configured dashboards from Grafana.com
+dashboards:
+  default:
+    # Kubernetes cluster monitoring
+    kubernetes-cluster:
+      gnetId: 6417
+      revision: 1
+      datasource: Prometheus
+    # Node Exporter Full
+    node-exporter:
+      gnetId: 1860
+      revision: 37
+      datasource: Prometheus
+    # PostgreSQL Database
+    postgresql:
+      gnetId: 9628
+      revision: 7
+      datasource: Prometheus
+
+# Grafana configuration
+grafana.ini:
+  server:
+    root_url: "%(protocol)s://%(domain)s/grafana"
+    serve_from_sub_path: true
+  analytics:
+    check_for_updates: false
+    reporting_enabled: false
+  log:
+    mode: console
+    level: info
+  security:
+    disable_gravatar: true
+  users:
+    allow_sign_up: false
+    auto_assign_org: true
+    auto_assign_org_role: Viewer
+
+# RBAC
+rbac:
+  create: true
+  pspEnabled: false
+
+# Service account
+serviceAccount:
+  create: true
+
+# Pod labels
+podLabels:
+  app: grafana
+  component: monitoring
+  environment: vps
+
+# Liveness/Readiness probes
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: 3000
+  initialDelaySeconds: 60
+  timeoutSeconds: 30
+  failureThreshold: 10
+
+readinessProbe:
+  httpGet:
+    path: /api/health
+    port: 3000
+  initialDelaySeconds: 30
+  timeoutSeconds: 10

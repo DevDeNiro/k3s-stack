@@ -1,0 +1,346 @@
+# ==============================================================================
+# COMMON-LIBRARY - Reference Values
+# This file documents all supported values for charts using this library.
+# Copy relevant sections to your application's values.yaml
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# GLOBAL CONFIGURATION
+# ------------------------------------------------------------------------------
+global:
+  # Environment name (dev, alpha, prod)
+  environment: dev
+  # Project name (used for namespace naming)
+  project: ""
+  # Base domain for auto-generated hostnames
+  baseDomain: local
+  # MonoRepo mode: namespace = environment only
+  isMonoRepo: false
+
+# ------------------------------------------------------------------------------
+# IMAGE
+# ------------------------------------------------------------------------------
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+#  - name: docker-registry-secret
+
+# ------------------------------------------------------------------------------
+# REPLICA & AUTOSCALING
+# ------------------------------------------------------------------------------
+replicaCount: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+# ------------------------------------------------------------------------------
+# SERVICE
+# ------------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  # nodePort: 30000  # Only for NodePort type
+  # loadBalancerIP: ""  # Only for LoadBalancer type
+  annotations: {}
+
+# ------------------------------------------------------------------------------
+# HTTPROUTE (Gateway API)
+# ------------------------------------------------------------------------------
+httpRoute:
+  enabled: false
+  annotations: {}
+  
+  # Parent Gateway reference (default: infrastructure-gateway in nginx-gateway)
+  # Option 1: Simple configuration
+  gatewayName: infrastructure-gateway
+  gatewayNamespace: nginx-gateway
+  
+  # Option 2: Full parentRefs (overrides gatewayName/gatewayNamespace)
+  parentRefs: []
+  #  - name: infrastructure-gateway
+  #    namespace: nginx-gateway
+  #    sectionName: https  # Optional: target specific listener
+  
+  # Hostnames (if empty, auto-generated from global.baseDomain)
+  hostnames: []
+  #  - app.example.com
+  
+  # Simple routing (used if rules is empty)
+  path: /
+  pathType: PathPrefix
+  
+  # Advanced routing rules
+  rules: []
+  #  - matches:
+  #      - path:
+  #          type: PathPrefix
+  #          value: /api
+  #    backendRefs:
+  #      - name: api-service
+  #        port: 8080
+  #  - matches:
+  #      - path:
+  #          type: PathPrefix
+  #          value: /
+  #    backendRefs:
+  #      - name: frontend-service
+  #        port: 80
+
+# ------------------------------------------------------------------------------
+# SERVICE ACCOUNT & RBAC
+# ------------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automount: true
+
+rbac:
+  create: false
+  # Namespace-scoped rules
+  rules: []
+  #  - apiGroups: [""]
+  #    resources: ["configmaps"]
+  #    verbs: ["get", "list"]
+  
+  # Cluster-wide permissions
+  clusterWide: false
+  clusterRules: []
+  
+  # Extra subjects for RoleBinding
+  extraSubjects: []
+  #  - kind: ServiceAccount
+  #    name: gitlab-runner
+  #    namespace: gitlab-runner
+  
+  roleRef:
+    kind: Role
+    name: ""  # Defaults to fullname
+
+# ------------------------------------------------------------------------------
+# NAMESPACE
+# ------------------------------------------------------------------------------
+namespace:
+  create: false
+  environment: ""  # Falls back to global.environment
+  
+  resourceQuota:
+    enabled: false
+    hard:
+      requests.cpu: "2"
+      requests.memory: 2Gi
+      limits.cpu: "4"
+      limits.memory: 4Gi
+      pods: "20"
+  
+  limitRange:
+    enabled: false
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+
+# ------------------------------------------------------------------------------
+# NETWORK POLICY
+# ------------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  
+  # Namespaces
+  gatewayNamespace: nginx-gateway
+  monitoringNamespace: monitoring
+  databaseNamespace: storage
+  authNamespace: security
+  
+  # Allow rules
+  allowMonitoring: true
+  allowDatabase: true
+  allowAuth: true
+  allowOtel: false
+  allowExternal: false
+  
+  # Database port (PostgreSQL default)
+  databasePort: 5432
+  
+  # Extra rules
+  extraIngress: []
+  extraEgress: []
+
+# ------------------------------------------------------------------------------
+# SEALED SECRETS
+# ------------------------------------------------------------------------------
+sealedSecrets:
+  enabled: false
+  
+  # Docker registry secret
+  dockerRegistry:
+    name: docker-registry-secret
+    encryptedData: ""
+  
+  # Generic secrets list
+  secrets: []
+  #  - name: postgresql
+  #    data:
+  #      password: "AgB..."
+  #  - name: keycloak-client
+  #    data:
+  #      client-secret: "AgD..."
+  
+  # Legacy format (for backward compatibility)
+  ghcr:
+    encryptedData: ""
+  postgresql:
+    encryptedData: ""
+  keycloak:
+    encryptedData: ""
+
+# ------------------------------------------------------------------------------
+# POD CONFIGURATION
+# ------------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+#  fsGroup: 1001
+#  seccompProfile:
+#    type: RuntimeDefault
+
+securityContext: {}
+#  runAsUser: 1001
+#  runAsNonRoot: true
+#  allowPrivilegeEscalation: false
+#  readOnlyRootFilesystem: true
+#  capabilities:
+#    drop:
+#      - ALL
+
+# ------------------------------------------------------------------------------
+# RESOURCES
+# ------------------------------------------------------------------------------
+resources: {}
+#  requests:
+#    memory: "256Mi"
+#    cpu: "100m"
+#  limits:
+#    memory: "512Mi"
+#    cpu: "500m"
+
+# ------------------------------------------------------------------------------
+# PROBES
+# ------------------------------------------------------------------------------
+# Option 1: Full probe configuration
+livenessProbe: {}
+#  httpGet:
+#    path: /health
+#    port: http
+#  initialDelaySeconds: 30
+#  periodSeconds: 10
+
+readinessProbe: {}
+#  httpGet:
+#    path: /health
+#    port: http
+#  initialDelaySeconds: 5
+#  periodSeconds: 5
+
+# Option 2: Simple healthcheck (used if probes not defined)
+healthcheck:
+  path: /health
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+# ------------------------------------------------------------------------------
+# ENVIRONMENT VARIABLES
+# ------------------------------------------------------------------------------
+env: {}
+#  MY_VAR: "value"
+
+envSecrets: {}
+#  SECRET_KEY: "key-in-secret"
+
+extraEnv: []
+#  - name: CUSTOM_VAR
+#    value: "custom-value"
+
+extraEnvFrom: []
+#  - secretRef:
+#      name: my-secret
+
+# ------------------------------------------------------------------------------
+# VOLUMES
+# ------------------------------------------------------------------------------
+volumes: []
+volumeMounts: []
+
+# ------------------------------------------------------------------------------
+# SCHEDULING
+# ------------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ------------------------------------------------------------------------------
+# MIGRATION JOB (ArgoCD PreSync)
+# ------------------------------------------------------------------------------
+migration:
+  enabled: false
+  # Migration type: liquibase, flyway, or custom
+  type: liquibase
+  # Spring profile override for migrations (recommended: create a dedicated "migration" profile)
+  # If not set, uses spring.profiles.active
+  # A dedicated profile should disable web beans, security, etc. to run migrations quickly
+  springProfile: ""
+  # ArgoCD hook delete policy
+  hookDeletePolicy: HookSucceeded
+  # Job settings
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  # Custom command/args (for non-Spring Boot apps)
+  command: []
+  args: []
+  # Spring Boot specific
+  javaOpts: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+  # Extra environment variables
+  extraEnv: []
+  # Resources
+  resources: {}
+  #  requests:
+  #    cpu: "100m"
+  #    memory: "256Mi"
+  #  limits:
+  #    cpu: "500m"
+  #    memory: "512Mi"
+
+# ------------------------------------------------------------------------------
+# DATABASE (for migration jobs and app configuration)
+# ------------------------------------------------------------------------------
+database:
+  host: postgresql.storage.svc.cluster.local
+  port: 5432
+  name: ""
+  username: ""
+  existingSecret: postgresql
+  secretKey: password
+
+# ------------------------------------------------------------------------------
+# SPRING BOOT (optional - for Spring Boot applications)
+# ------------------------------------------------------------------------------
+spring:
+  profiles:
+    active: prod
+
+# ------------------------------------------------------------------------------
+# KEYCLOAK (for sealed secrets)
+# ------------------------------------------------------------------------------
+keycloak:
+  existingSecret: keycloak-client
+  secretKey: client-secret

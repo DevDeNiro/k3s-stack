@@ -1,0 +1,75 @@
+auth:
+    adminUser: admin
+    existingSecret: ""
+
+service:
+    type: ClusterIP
+    port: 80
+    httpsPort: 8443
+
+resources:
+    limits:
+        cpu: 1000m
+        memory: 1Gi
+    requests:
+        cpu: 500m
+        memory: 512Mi
+
+ingress:
+    enabled: false
+
+postgresql:
+    enabled: true
+    auth:
+        username: bn_keycloak
+        database: bitnami_keycloak
+    primary:
+        persistence:
+            enabled: true
+            size: 8Gi
+
+replicaCount: 1
+
+serviceAccount:
+    create: true
+    automountServiceAccountToken: true
+
+podSecurityContext:
+    enabled: true
+    fsGroup: 1001
+
+containerSecurityContext:
+    enabled: true
+    runAsUser: 1001
+    runAsNonRoot: true
+
+# Initial realm configuration
+extraStartupArgs: "--import-realm"
+
+# Realm import configuration using initContainers (optional)
+initContainers: [ ]
+  # - name: realm-config
+  #   image: bitnami/keycloak:latest
+  #   imagePullPolicy: IfNotPresent
+  #   command:
+  #     - /bin/sh
+  #     - -c
+  #     - |
+  #       mkdir -p /opt/bitnami/keycloak/data/import
+  #       cat > /opt/bitnami/keycloak/data/import/realm.json << 'EOF'
+  #       {
+  #         "realm": "myrealm",
+  #         "enabled": true
+  #       }
+  #       EOF
+  #   volumeMounts:
+#     - name: realm-config
+#       mountPath: /opt/bitnami/keycloak/data/import
+
+# volumes:
+#   - name: realm-config
+#     emptyDir: {}
+
+# volumeMounts:
+#   - name: realm-config
+#     mountPath: /opt/bitnami/keycloak/data/import

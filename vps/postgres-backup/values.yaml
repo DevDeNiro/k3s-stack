@@ -1,0 +1,92 @@
+# =============================================================================
+# PostgreSQL Backup Configuration - Production Only
+# =============================================================================
+# Backs up ALL production databases (*-prod) + infrastructure (keycloak)
+# Supports local storage + optional S3 off-site backup
+# =============================================================================
+
+# =============================================================================
+# Backup Schedules
+# =============================================================================
+schedules:
+    # Daily backup at 03:00 UTC (retained 7 days)
+    daily:
+        enabled: true
+        cron: "0 3 * * *"
+        retentionDays: 7
+    # Weekly backup on Sunday at 04:00 UTC (retained 30 days)
+    weekly:
+        enabled: true
+        cron: "0 4 * * 0"
+        retentionDays: 30
+    # Monthly backup on 1st at 05:00 UTC (retained 365 days)
+    monthly:
+        enabled: true
+        cron: "0 5 1 * *"
+        retentionDays: 365
+
+# =============================================================================
+# PostgreSQL Connection
+# =============================================================================
+postgresql:
+    host: postgresql.storage.svc.cluster.local
+    port: 5432
+    # Admin user for pg_dumpall / listing databases
+    adminUser: postgres
+    existingSecret: postgresql-secret
+    secretKey: postgres-password
+
+# =============================================================================
+# Databases to Backup
+# =============================================================================
+# "auto" = automatically discover all *-prod databases + keycloak
+# Or specify a list explicitly
+databases: auto
+# databases:
+#   - keycloak
+#   - another-app-prod
+
+# Always include these infrastructure databases
+infrastructureDatabases:
+    - keycloak
+
+# =============================================================================
+# Local Storage
+# =============================================================================
+localStorage:
+    enabled: true
+    storageSize: 20Gi
+    storageClass: ""
+    mountPath: /backups
+
+# =============================================================================
+# S3 Off-site Backup (optional)
+# =============================================================================
+s3:
+    enabled: false
+    # S3-compatible endpoint (AWS, MinIO, Scaleway, etc.)
+    endpoint: "https://s3.amazonaws.com"
+    bucket: "my-backup-bucket"
+    region: "eu-west-1"
+    # Path prefix in bucket
+    prefix: "k3s-postgres-backups"
+    # Credentials from secret
+    existingSecret: ""
+    accessKeyKey: "access-key"
+    secretKeyKey: "secret-key"
+
+# =============================================================================
+# Container Configuration
+# =============================================================================
+image:
+    repository: bitnami/postgresql
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+resources:
+    requests:
+        memory: "128Mi"
+        cpu: "100m"
+    limits:
+        memory: "256Mi"
+        cpu: "500m"

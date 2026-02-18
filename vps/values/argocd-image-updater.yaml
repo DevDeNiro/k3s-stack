@@ -1,0 +1,72 @@
+# =============================================================================
+# Argo CD Image Updater Configuration
+# Watches container registries and updates image tags automatically
+# =============================================================================
+
+# Resource limits (minimal for VPS)
+resources:
+    requests:
+        memory: "64Mi"
+        cpu: "25m"
+    limits:
+        memory: "128Mi"
+        cpu: "100m"
+
+# Logging and Configuration
+config:
+    # Log level (debug, info, warn, error)
+    logLevel: info
+
+    # Registries configuration
+    registries:
+        # GitHub Container Registry
+        -   name: ghcr
+            api_url: https://ghcr.io
+            prefix: ghcr.io
+            # Use pull secret for authentication
+            credentials: pullsecret:argocd/ghcr-registry-secret
+            # Default update strategy
+            default: true
+
+        # GitLab Container Registry (optional - uncomment if using GitLab)
+        # - name: gitlab
+        #   api_url: https://registry.gitlab.com
+        #   prefix: registry.gitlab.com
+        #   credentials: pullsecret:argocd/gitlab-registry-secret
+        #   default: false
+
+    # Application API kind (kubernetes for in-cluster ArgoCD)
+    applicationsAPIKind: kubernetes
+
+    # Argo CD configuration
+    argocd:
+        # Use gRPC for communication with Argo CD (faster)
+        grpcWeb: true
+        # Argo CD server address (in-cluster)
+        serverAddress: argocd-server.argocd.svc.cluster.local
+        # Insecure mode (TLS is terminated at ingress)
+        insecure: true
+        # Use plaintext (no TLS for in-cluster communication)
+        plaintext: true
+
+# Service account
+serviceAccount:
+    create: true
+    name: argocd-image-updater
+
+# RBAC - allow Image Updater to update Applications
+rbac:
+    enabled: true
+
+# Extra environment variables
+extraEnv:
+    # Git commit author
+    -   name: GIT_COMMIT_USER
+        value: "argocd-image-updater"
+    -   name: GIT_COMMIT_EMAIL
+        value: "image-updater@argocd.local"
+
+# Pod labels
+podLabels:
+    app: argocd-image-updater
+    component: gitops

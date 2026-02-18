@@ -1,0 +1,119 @@
+# =============================================================================
+# Keycloak Minimal Configuration for VPS (4-6GB RAM)
+# Uses external PostgreSQL from storage namespace
+# =============================================================================
+
+auth:
+  adminUser: admin
+  # Password managed via Kubernetes Secret (created by setup-secrets.sh)
+  existingSecret: keycloak-secret
+  passwordSecretKey: admin-password
+
+# Use external PostgreSQL (from storage namespace)
+# This saves ~512MB by not running a dedicated PostgreSQL instance
+postgresql:
+  enabled: false
+
+externalDatabase:
+  host: postgresql.storage.svc.cluster.local
+  port: 5432
+  user: keycloak
+  database: keycloak
+  existingSecret: keycloak-db-secret
+  existingSecretPasswordKey: password
+
+# Resource limits optimized for VPS
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1024Mi"
+    cpu: "1000m"
+
+# Single replica for VPS
+replicaCount: 1
+
+# Service configuration
+service:
+  type: ClusterIP
+  ports:
+    http: 80
+    https: 443
+
+# Ingress (configure host after deployment)
+ingress:
+  enabled: false
+  # Enable and configure after installation:
+  # hostname: auth.yourdomain.com
+  # ingressClassName: nginx
+
+# Development mode for initial setup (can enable production after TLS is configured)
+production: false
+# TLS termination at ingress level (proxy handles HTTPS)
+proxy: edge
+httpRelativePath: /
+
+# Health checks (increased delays for slow startup on resource-constrained VPS)
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 300
+  periodSeconds: 15
+  timeoutSeconds: 10
+  failureThreshold: 10
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 10
+  failureThreshold: 6
+
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 60
+
+# Security context
+containerSecurityContext:
+  enabled: true
+  runAsUser: 1001
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+
+podSecurityContext:
+  enabled: true
+  fsGroup: 1001
+
+# Service account
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+
+# Keycloak cache configuration (optimized for single instance)
+cache:
+  enabled: true
+  # Use local cache for single instance
+  stack: default
+
+# Extra environment variables
+extraEnvVars:
+  - name: KC_HEALTH_ENABLED
+    value: "true"
+  - name: KC_METRICS_ENABLED
+    value: "true"
+  - name: JAVA_OPTS_APPEND
+    value: "-Xms384m -Xmx768m -XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+
+# Pod labels
+podLabels:
+  app: keycloak
+  component: identity
+  environment: vps
+
+# Logging
+logging:
+  output: default
+  level: INFO
