@@ -113,6 +113,47 @@ kubectl create secret generic <name> -n <namespace> \
     --from-literal=key2=value2
 ```
 
+## Loki / LogQL (centralized logs)
+
+```bash
+# Port-forward Loki API
+kubectl port-forward -n monitoring svc/loki 3100:3100
+
+# Quick CLI query (logcli, optional install)
+logcli query '{namespace="coterie-webapp-alpha"} |= "ERROR"' --limit 50
+
+# Inside Grafana - Explore -> Loki datasource
+```
+
+LogQL recipes (paste in Grafana Explore):
+
+```logql
+# All logs of a namespace, last 24h
+{namespace="coterie-webapp-alpha"}
+
+# Spring Boot exceptions only
+{namespace="coterie-webapp-alpha"} |~ "Caused by:.*Exception"
+
+# Count errors per minute per pod
+sum by (pod) (rate({namespace="coterie-webapp-alpha"} |= "ERROR" [1m]))
+
+# Find the 2026-05-18 class of bug (placeholder Base64)
+{namespace=~".+"} |~ "Illegal base64 character"
+```
+
+## Alertmanager
+
+```bash
+# Port-forward Alertmanager UI
+kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:80
+
+# List active alerts via API
+curl -s http://localhost:9093/api/v2/alerts | jq '.[] | {alertname: .labels.alertname, severity: .labels.severity, namespace: .labels.namespace, pod: .labels.pod, summary: .annotations.summary}'
+
+# Silence an alert (CLI requires amtool)
+amtool silence add alertname=KubePodCrashLooping namespace=coterie-webapp-alpha --duration=1h --comment="investigating"
+```
+
 ## ArgoCD
 
 ```bash

@@ -27,6 +27,8 @@ INSTALL_POSTGRESQL="${INSTALL_POSTGRESQL:-true}"
 INSTALL_ARGOCD="${INSTALL_ARGOCD:-true}"
 INSTALL_SEALED_SECRETS="${INSTALL_SEALED_SECRETS:-true}"
 INSTALL_REDIS="${INSTALL_REDIS:-true}"
+INSTALL_LOKI="${INSTALL_LOKI:-true}"
+INSTALL_PROMTAIL="${INSTALL_PROMTAIL:-true}"
 INSTALL_NETWORK_POLICIES="${INSTALL_NETWORK_POLICIES:-true}"
 ENABLE_AUDIT_LOGGING="${ENABLE_AUDIT_LOGGING:-true}"
 
@@ -493,6 +495,53 @@ install_grafana() {
 }
 
 # -----------------------------------------------------------------------------
+# Install Loki (SingleBinary) - centralized log aggregation
+# Added 2026-05 to address the observability gap revealed by the
+# coterie-webapp-alpha postmortem (logs --previous lost on pod prune).
+# -----------------------------------------------------------------------------
+install_loki() {
+    if [[ "$INSTALL_LOKI" != "true" ]]; then
+        echo -e "${YELLOW}>>> Skipping Loki (INSTALL_LOKI=false)${NC}"
+        return 0
+    fi
+
+    echo -e "\n${YELLOW}>>> Installing Loki (SingleBinary)...${NC}"
+
+    kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+    helm upgrade --install loki grafana/loki \
+        --namespace monitoring \
+        -f "$SCRIPT_DIR/values/loki.yaml" \
+        --wait --timeout 5m
+
+    echo -e "${GREEN}✓ Loki installed (loki.monitoring.svc.cluster.local:3100)${NC}"
+}
+
+# -----------------------------------------------------------------------------
+# Install Promtail (DaemonSet log collector that ships to Loki)
+# -----------------------------------------------------------------------------
+install_promtail() {
+    if [[ "$INSTALL_PROMTAIL" != "true" ]]; then
+        echo -e "${YELLOW}>>> Skipping Promtail (INSTALL_PROMTAIL=false)${NC}"
+        return 0
+    fi
+
+    if [[ "$INSTALL_LOKI" != "true" ]]; then
+        echo -e "${YELLOW}>>> Skipping Promtail (Loki disabled, nothing to ship to)${NC}"
+        return 0
+    fi
+
+    echo -e "\n${YELLOW}>>> Installing Promtail (DaemonSet)...${NC}"
+
+    helm upgrade --install promtail grafana/promtail \
+        --namespace monitoring \
+        -f "$SCRIPT_DIR/values/promtail.yaml" \
+        --wait --timeout 3m
+
+    echo -e "${GREEN}✓ Promtail installed (logs shipping to Loki)${NC}"
+}
+
+# -----------------------------------------------------------------------------
 # Install Sealed Secrets
 # -----------------------------------------------------------------------------
 install_sealed_secrets() {
@@ -717,6 +766,22 @@ print_summary() {
         echo -e "  Port-forward: kubectl port-forward -n monitoring svc/grafana 3000:80"
         echo -e "  User: admin"
         echo -e "  Password: sudo ./vps/scripts/export-secrets.sh show grafana"
+        echo -e "  Loki datasource pre-configured; dashboards 15760/15757/13639/9578 pre-loaded."
+    fi
+
+    if [[ "$INSTALL_LOKI" == "true" ]]; then
+        echo -e "\n${YELLOW}Loki (centralized logs):${NC}"
+        echo -e "  Internal: loki.monitoring.svc.cluster.local:3100"
+        echo -e "  Query in Grafana: select 'Loki' datasource in Explore"
+        echo -e "  Example LogQL: {namespace=\"<app>-alpha\"} |= \"ERROR\""
+        echo -e "  Retention: 7 days (configurable in vps/values/loki.yaml)"
+    fi
+
+    if [[ "$INSTALL_PROMETHEUS" == "true" ]]; then
+        echo -e "\n${YELLOW}Alertmanager (no receivers by default):${NC}"
+        echo -e "  Port-forward: kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:80"
+        echo -e "  Configure receivers (Discord/Slack/email) in vps/values/prometheus.yaml"
+        echo -e "  See vps/docs/observability.md for Discord webhook recipe."
     fi
     
     if [[ "$INSTALL_KEYCLOAK" == "true" ]]; then
@@ -810,6 +875,8 @@ main() {
     configure_coredns_internal_hosts  # Fix hairpin NAT for auth.<domain>
     install_prometheus
     install_grafana
+    install_loki
+    install_promtail
     install_redis
     install_sealed_secrets
     install_argocd

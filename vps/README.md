@@ -4,16 +4,21 @@ Deploy a production-ready K3s cluster on a VPS (4-6GB RAM) with essential servic
 
 ## 📋 What You Get
 
-| Service           | Purpose                                          | Memory |
-|-------------------|--------------------------------------------------|--------|
-| **K3s**           | Kubernetes runtime                               | ~500MB |
-| **PostgreSQL**    | Database with pg_stat_statements + WAL archiving | ~384MB |
-| **Keycloak**      | Identity & Access Management                     | ~768MB |
-| **Prometheus**    | Metrics collection                               | ~256MB |
-| **Grafana**       | Monitoring dashboards                            | ~256MB |
-| **Ingress NGINX** | HTTP(S) routing                                  | ~256MB |
+| Service               | Purpose                                          | Memory |
+|-----------------------|--------------------------------------------------|--------|
+| **K3s**               | Kubernetes runtime                               | ~500MB |
+| **PostgreSQL**        | Database with pg_stat_statements + WAL archiving | ~384MB |
+| **Keycloak**          | Identity & Access Management                     | ~768MB |
+| **Prometheus**        | Metrics collection + alerting rules              | ~256MB |
+| **Alertmanager**      | Alert routing + grouping (Discord/Slack/email)   | ~64MB  |
+| **Loki (SingleBin.)** | Centralized log aggregation (7d retention)       | ~256MB |
+| **Promtail**          | DaemonSet: ships pod logs to Loki                | ~128MB |
+| **Grafana**           | Dashboards + Explore (Prom/Loki/AM)              | ~256MB |
+| **Ingress NGINX**     | HTTP(S) routing                                  | ~256MB |
 
-**Total: ~2.5GB** (leaves ~1.5GB for your applications on a 4GB VPS)
+**Total: ~3.1GB** (leaves ~1-3GB for your applications on a 4-6GB VPS)
+
+> Observability stack details: [`docs/observability.md`](docs/observability.md). Crash runbook: [`docs/runbook_pod_crashes.md`](docs/runbook_pod_crashes.md).
 
 ## 🎯 Prerequisites
 

@@ -1,0 +1,104 @@
+# =============================================================================
+# Loki SingleBinary Configuration for VPS (4-6GB RAM)
+# Lightweight log aggregation - one pod, filesystem storage, 7-day retention.
+# Solves the "logs --previous disappears once pod is pruned" problem documented
+# in postmortem_2026-05-18_coterie_alpha_vapid.md.
+# =============================================================================
+
+# Deployment mode: single binary (vs distributed simple-scalable or microservices).
+# SingleBinary fits the constraints of a single-node VPS perfectly.
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+    path_prefix: /var/loki
+
+  storage:
+    type: filesystem
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+
+  schemaConfig:
+    configs:
+      - from: 2024-01-01
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  # Retention configuration: 7 days for log streams
+  limits_config:
+    retention_period: 168h          # 7 days
+    ingestion_rate_mb: 4
+    ingestion_burst_size_mb: 6
+    max_query_parallelism: 8
+    max_streams_per_user: 10000
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+
+  # Reduce memory by disabling the structured-metadata feature for now
+  query_range:
+    cache_results: false
+
+# Single binary mode: 1 replica, all-in-one process
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "300m"
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  extraArgs:
+    - "-config.expand-env=true"
+
+# Disable distributed components (we're in SingleBinary mode)
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# Lightweight gateway (NGINX in front of Loki) - disabled, Grafana talks to the
+# single-binary directly via Service to save the extra pod and memory.
+gateway:
+  enabled: false
+
+# Service monitor disabled (we scrape via existing prometheus annotations)
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+  lokiCanary:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+
+# Test pod disabled
+test:
+  enabled: false
+
+# Disable chunkscache memcached (saves ~64Mi)
+chunksCache:
+  enabled: false
+
+resultsCache:
+  enabled: false

@@ -9,9 +9,11 @@ A lightweight K3s stack with everything you need to run containerized applicatio
 
 - **PostgreSQL** — Database with automated backups
 - **Keycloak** — Identity management (SSO/OAuth2/OIDC)
-- **Prometheus + Grafana** — Monitoring and dashboards
-- **NGINX Ingress** — HTTP/HTTPS routing with Let's Encrypt
-- **Argo CD** — GitOps continuous deployment
+- **Prometheus + Alertmanager** — Metrics scraping and alerting (pod crashes, OOM, node pressure)
+- **Loki + Promtail** — Centralized log aggregation with LogQL (7-day retention)
+- **Grafana** — Dashboards + unified Explore over Prometheus/Loki/Alertmanager
+- **NGINX Gateway Fabric** — HTTP/HTTPS routing via Kubernetes Gateway API + Let's Encrypt
+- **Argo CD** — GitOps continuous deployment with auto-discovery
 - **Sealed Secrets** — Secure secret management
 
 ## Deployment Modes

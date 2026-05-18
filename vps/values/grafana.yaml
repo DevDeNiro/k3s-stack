@@ -58,6 +58,24 @@ datasources:
           httpMethod: POST
           manageAlerts: true
           prometheusType: Prometheus
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki.monitoring.svc.cluster.local:3100
+        isDefault: false
+        editable: false
+        jsonData:
+          maxLines: 1000
+          # Derived fields can be added later to link traces from log lines
+          # (e.g. extract trace_id from log line and link to Tempo).
+      - name: Alertmanager
+        type: alertmanager
+        access: proxy
+        url: http://prometheus-alertmanager.monitoring.svc.cluster.local
+        isDefault: false
+        editable: false
+        jsonData:
+          implementation: prometheus
 
 # Dashboard providers
 dashboardProviders:
@@ -83,6 +101,8 @@ dashboardProviders:
       #     path: /var/lib/grafana/dashboards/myapp
 
 # Pre-configured dashboards from Grafana.com
+# Added 2026-05 after the coterie-webapp-alpha postmortem: we need dashboards
+# focused on pod restarts, container states, and centralized logs.
 dashboards:
   default:
     # Kubernetes cluster monitoring
@@ -99,6 +119,30 @@ dashboards:
     postgresql:
       gnetId: 9628
       revision: 7
+      datasource: Prometheus
+    # Kubernetes / Views / Pods - restart counts, container states, memory/CPU per pod
+    # https://grafana.com/grafana/dashboards/15760
+    kubernetes-pods:
+      gnetId: 15760
+      revision: 36
+      datasource: Prometheus
+    # Kubernetes / Views / Global - cluster-wide overview with health badges
+    # https://grafana.com/grafana/dashboards/15757
+    kubernetes-global:
+      gnetId: 15757
+      revision: 43
+      datasource: Prometheus
+    # Logs / App - LogQL-powered log explorer per namespace/pod
+    # https://grafana.com/grafana/dashboards/13639
+    loki-logs:
+      gnetId: 13639
+      revision: 2
+      datasource: Loki
+    # Alertmanager overview
+    # https://grafana.com/grafana/dashboards/9578
+    alertmanager:
+      gnetId: 9578
+      revision: 4
       datasource: Prometheus
 
 # Grafana configuration

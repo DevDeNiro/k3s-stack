@@ -1,0 +1,3 @@
+[2026-05-18T13:32:59.1454895+02:00] Investigation started, working dir: C:\Users\oldon\vps-investigation-20260518T133259Z
+INV_DIR=C:\Users\oldon\vps-investigation-20260518T133259Z
+INV_TS=20260518T133259Z

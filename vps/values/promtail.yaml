@@ -1,0 +1,54 @@
+# =============================================================================
+# Promtail DaemonSet - tails /var/log/pods/*.log and ships to Loki SingleBinary
+# Runs on every node (only one node in the VPS deployment).
+# =============================================================================
+
+# Resource budget kept very small - the chart default is OK for a single node
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "25m"
+  limits:
+    memory: "128Mi"
+    cpu: "100m"
+
+# Send logs to Loki SingleBinary
+config:
+  clients:
+    - url: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+      # tenant_id only needed if auth_enabled=true on Loki
+      backoff_config:
+        min_period: 500ms
+        max_period: 5m
+        max_retries: 10
+
+  snippets:
+    pipelineStages:
+      # Standard: docker/containerd already produces JSON-formatted lines, but
+      # k3s containerd writes plain text logs - keep both stages for safety.
+      - cri: {}
+      - docker: {}
+      # Drop noisy kube-system probes from logs
+      - match:
+          selector: '{namespace="kube-system",container=~"local-path-provisioner|metrics-server"}'
+          action: drop
+          drop_counter_reason: noisy_system
+
+# Only run on linux/amd64 nodes
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations:
+  - effect: NoSchedule
+    operator: Exists
+  - effect: NoExecute
+    operator: Exists
+
+# Pod labels for prometheus auto-discovery (optional)
+podLabels:
+  app: promtail
+  component: log-collector
+
+# Service monitor disabled (we expose /metrics via existing scrape annotations)
+serviceMonitor:
+  enabled: false
