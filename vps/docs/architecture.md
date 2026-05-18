@@ -4,19 +4,19 @@
 
 Chaque application onboardée via `onboard-app.sh` dispose de :
 
-| Ressource | Alpha | Prod |
-|-----------|-------|------|
-| Namespace | `<app>-alpha` | `<app>-prod` |
-| Database | `<app>-alpha` | `<app>-prod` |
-| User PostgreSQL | `<app>-alpha` | `<app>-prod` |
-| Backup auto | ❌ | ✅ (daily/weekly/monthly) |
+| Ressource       | Alpha         | Prod                     |
+|-----------------|---------------|--------------------------|
+| Namespace       | `<app>-alpha` | `<app>-prod`             |
+| Database        | `<app>-alpha` | `<app>-prod`             |
+| User PostgreSQL | `<app>-alpha` | `<app>-prod`             |
+| Backup auto     | ❌             | ✅ (daily/weekly/monthly) |
 
 ### Workflow Git → Environnement
 
-| Branche | Namespace | Tag Strategy |
-|---------|-----------|--------------|
+| Branche   | Namespace     | Tag Strategy       |
+|-----------|---------------|--------------------|
 | `develop` | `<app>-alpha` | SHA (`sha-7b3f1a`) |
-| `main` | `<app>-prod` | SemVer (`v1.0.0`) |
+| `main`    | `<app>-prod`  | SemVer (`v1.0.0`)  |
 
 ---
 
@@ -29,6 +29,7 @@ ImageUpdater CR → Lit annotations Application → Met à jour image.tag
 ```
 
 **Fichiers clés** :
+
 - `manifests/argocd-image-updater-crs.yaml` - CRs pour `*-alpha` et `*-prod`
 - `manifests/argocd-autodiscover.yaml` - ApplicationSets avec annotations
 
@@ -75,14 +76,14 @@ Les migrations s'exécutent **avant** le déploiement via un Job PreSync.
 ```yaml
 # Chart.yaml
 dependencies:
-    - name: common-library
-      version: "2.1.0"
-      repository: "oci://ghcr.io/devdeniro"
+    -   name: common-library
+        version: "2.1.0"
+        repository: "oci://ghcr.io/devdeniro"
 ```
 
 ```yaml
 # templates/migration-job.yaml
-{{- include "common.migrationJob.springBoot" . }}
+{ { - include "common.migrationJob.springBoot" . } }
 ```
 
 ```yaml
@@ -120,10 +121,10 @@ kubectl logs -n <app>-alpha job/<app>-migration-<revision>
 
 Une instance Keycloak, un realm par environnement :
 
-| Env | Realm | URL |
-|-----|-------|-----|
+| Env   | Realm         | URL                                          |
+|-------|---------------|----------------------------------------------|
 | Alpha | `<app>-alpha` | `https://auth.domain.com/realms/<app>-alpha` |
-| Prod | `<app>-prod` | `https://auth.domain.com/realms/<app>-prod` |
+| Prod  | `<app>-prod`  | `https://auth.domain.com/realms/<app>-prod`  |
 
 ### Créer un realm (CLI)
 
