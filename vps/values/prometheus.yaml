@@ -173,6 +173,191 @@ serverFiles:
               summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} <10% free"
               description: "Risk of pod evictions and PostgreSQL/Loki write failures."
 
+      # ====================================================================
+      # Application-level rules (ported from coterie-webapp/docker/observability/alert_rules.yml)
+      # These complement the K8s/node rules above with app-specific signals.
+      # All metrics are tagged `application` by Micrometer (ObservabilityConfiguration.kt)
+      # and `namespace` by the kubernetes-pods Prometheus scrape job, so each alert
+      # naturally fires once per (application, namespace) pair (alpha + prod).
+      # ====================================================================
+      - name: app-latency
+        interval: 30s
+        rules:
+          - alert: HighP95Latency
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum by (le, application, namespace, uri) (
+                  rate(http_server_requests_seconds_bucket{application="coterie-webapp"}[5m])
+                )
+              ) > 0.5
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High P95 latency on {{ $labels.namespace }} {{ $labels.uri }}"
+              description: "P95 latency is {{ $value | printf \"%.2f\" }}s (threshold: 500ms) on {{ $labels.application }} ({{ $labels.namespace }})."
+
+          - alert: CriticalP99Latency
+            expr: |
+              histogram_quantile(
+                0.99,
+                sum by (le, application, namespace, uri) (
+                  rate(http_server_requests_seconds_bucket{application="coterie-webapp"}[5m])
+                )
+              ) > 1
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Critical P99 latency on {{ $labels.namespace }} {{ $labels.uri }}"
+              description: "P99 latency is {{ $value | printf \"%.2f\" }}s (threshold: 1s) on {{ $labels.application }} ({{ $labels.namespace }})."
+
+          - alert: SlowDatabaseQueries
+            expr: |
+              rate(r2dbc_pool_acquire_seconds_sum{application="coterie-webapp"}[5m])
+              /
+              rate(r2dbc_pool_acquire_seconds_count{application="coterie-webapp"}[5m]) > 0.1
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Slow DB connection acquisition on {{ $labels.namespace }}"
+              description: "Average connection acquire time is {{ $value | printf \"%.2f\" }}s on {{ $labels.application }} ({{ $labels.namespace }})."
+
+      - name: app-errors
+        interval: 30s
+        rules:
+          - alert: HighErrorRate
+            expr: |
+              sum by (application, namespace) (
+                rate(http_server_requests_seconds_count{application="coterie-webapp", status=~"5.."}[5m])
+              )
+              /
+              sum by (application, namespace) (
+                rate(http_server_requests_seconds_count{application="coterie-webapp"}[5m])
+              ) > 0.01
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High HTTP 5xx error rate on {{ $labels.namespace }}"
+              description: "5xx rate is {{ $value | humanizePercentage }} (threshold: 1%) on {{ $labels.application }} ({{ $labels.namespace }})."
+
+          - alert: CriticalErrorRate
+            expr: |
+              sum by (application, namespace) (
+                rate(http_server_requests_seconds_count{application="coterie-webapp", status=~"5.."}[5m])
+              )
+              /
+              sum by (application, namespace) (
+                rate(http_server_requests_seconds_count{application="coterie-webapp"}[5m])
+              ) > 0.05
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Critical HTTP 5xx error rate on {{ $labels.namespace }}"
+              description: "5xx rate is {{ $value | humanizePercentage }} (threshold: 5%) on {{ $labels.application }} ({{ $labels.namespace }})."
+
+          - alert: ExternalServiceFailures
+            expr: sum by (application, namespace) (rate(coterie_external_send_email_failure_total[5m])) > 0.1
+            for: 3m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Email service failures on {{ $labels.namespace }}"
+              description: "{{ $value | printf \"%.2f\" }} email failures/s on {{ $labels.namespace }}."
+
+      - name: app-availability
+        interval: 30s
+        rules:
+          # We rely on KubePodCrashLooping / KubePodNotReady from the kubernetes-pods group above
+          # for pod-level availability. This rule catches the case where the scrape itself fails
+          # (pod is up but /actuator/prometheus is unreachable) - usually a misconfigured probe.
+          - alert: AppScrapeDown
+            expr: |
+              up{job="kubernetes-pods", namespace=~"coterie-webapp-.*"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Prometheus cannot scrape {{ $labels.namespace }}/{{ $labels.pod }}"
+              description: "Pod is up but /actuator/prometheus is unreachable for >1m. Check the actuator endpoint config or the NetworkPolicy."
+
+      - name: app-resilience
+        interval: 30s
+        rules:
+          - alert: CircuitBreakerOpen
+            expr: resilience4j_circuitbreaker_state{state="open", application="coterie-webapp"} == 1
+            for: 0s
+            labels:
+              severity: critical
+            annotations:
+              summary: "Circuit breaker {{ $labels.name }} OPEN on {{ $labels.namespace }}"
+              description: "Circuit breaker {{ $labels.name }} has tripped on {{ $labels.application }} ({{ $labels.namespace }}). Requests are being rejected."
+
+          - alert: CircuitBreakerHalfOpen
+            expr: resilience4j_circuitbreaker_state{state="half_open", application="coterie-webapp"} == 1
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Circuit breaker {{ $labels.name }} stuck HALF_OPEN on {{ $labels.namespace }}"
+              description: "Circuit breaker has been half-open for 5m on {{ $labels.application }} ({{ $labels.namespace }}). May indicate flapping."
+
+          - alert: HighRetryRate
+            expr: |
+              sum by (application, namespace) (
+                rate(resilience4j_retry_calls_total{application="coterie-webapp", kind="retry"}[5m])
+              )
+              /
+              sum by (application, namespace) (
+                rate(resilience4j_retry_calls_total{application="coterie-webapp"}[5m])
+              ) > 0.1
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High retry rate on {{ $labels.namespace }}"
+              description: "{{ $value | humanizePercentage }} of calls are retries on {{ $labels.application }} ({{ $labels.namespace }}) (threshold: 10%)."
+
+      - name: app-saturation
+        interval: 30s
+        rules:
+          - alert: ConnectionPoolExhausted
+            expr: r2dbc_pool_pending{application="coterie-webapp"} > 5
+            for: 1m
+            labels:
+              severity: warning
+            annotations:
+              summary: "R2DBC pool has pending requests on {{ $labels.namespace }}"
+              description: "{{ $value }} requests waiting for a connection on {{ $labels.application }} ({{ $labels.namespace }})."
+
+          - alert: ConnectionPoolCritical
+            expr: |
+              r2dbc_pool_acquired{application="coterie-webapp"}
+              /
+              r2dbc_pool_max_allocated{application="coterie-webapp"} > 0.9
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "R2DBC pool near exhaustion on {{ $labels.namespace }}"
+              description: "Pool is {{ $value | humanizePercentage }} utilized on {{ $labels.application }} ({{ $labels.namespace }})."
+
+          - alert: HighJvmMemoryUsage
+            expr: |
+              jvm_memory_used_bytes{application="coterie-webapp", area="heap"}
+              /
+              jvm_memory_max_bytes{application="coterie-webapp", area="heap"} > 0.85
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High JVM heap on {{ $labels.namespace }}/{{ $labels.pod }}"
+              description: "Heap usage is {{ $value | humanizePercentage }} on {{ $labels.application }} ({{ $labels.namespace }})."
+
 # =============================================================================
 # Alertmanager - lightweight, no receivers configured by default
 # Add Discord/Slack/email webhook in alertmanagerFiles to send notifications.
@@ -196,28 +381,45 @@ alertmanager:
     runAsNonRoot: true
     runAsGroup: 65534
     fsGroup: 65534
+  # Mount the Discord webhook URL as a file so it never appears in plaintext in the values.yaml.
+  # The Secret is created by `vps/scripts/setup-secrets.sh set-discord-webhook` (key: webhook-url).
+  # The Alertmanager config below references the file via `url_file:`.
+  extraSecretMounts:
+    - name: alertmanager-discord-webhook
+      mountPath: /etc/alertmanager/secrets/discord
+      subPath: ""
+      secretName: alertmanager-discord-webhook
+      readOnly: true
+      optional: true  # don't crashloop Alertmanager if the secret hasn't been created yet
 
 alertmanagerFiles:
   alertmanager.yml:
     global:
       resolve_timeout: 5m
     route:
+      # Default: drop everything (acts as a safety net for unrouted alerts).
       receiver: 'null'
       group_by: ['alertname', 'severity', 'namespace']
       group_wait: 30s
       group_interval: 5m
       repeat_interval: 4h
-      # Override per-severity by uncommenting and adding a webhook receiver below.
-      # routes:
-      #   - matchers: [ severity="critical" ]
-      #     receiver: 'discord'
-      #     continue: true
+      routes:
+        # Critical and warning go to Discord. If the secret isn't mounted yet, the
+        # send will fail and Alertmanager will keep retrying without crashing - the
+        # alert still surfaces in the Alertmanager UI.
+        - matchers:
+            - severity =~ "critical|warning"
+          receiver: 'discord'
+          continue: false
     receivers:
       - name: 'null'
-      # - name: 'discord'
-      #   webhook_configs:
-      #     - url: 'https://discord.com/api/webhooks/REPLACE_WITH_REAL_ID/REPLACE_WITH_REAL_TOKEN/slack'
-      #       send_resolved: true
+      - name: 'discord'
+        webhook_configs:
+          # Discord supports Slack-compatible webhook payloads via the `/slack` suffix.
+          # Store ONLY the full URL (incl. /slack) in the Secret under key `webhook-url`.
+          - url_file: /etc/alertmanager/secrets/discord/webhook-url
+            send_resolved: true
+            max_alerts: 0
     inhibit_rules:
       - source_matchers: [ severity="critical" ]
         target_matchers: [ severity="warning" ]

@@ -312,6 +312,80 @@ EOSQL
 }
 
 # -----------------------------------------------------------------------------
+# Create / update the Alertmanager Discord webhook Secret
+# Stores ONLY the webhook URL (with /slack suffix) in a Kubernetes Secret
+# mounted into the alertmanager pod via alertmanager.extraSecretMounts
+# (see vps/values/prometheus.yaml).
+# -----------------------------------------------------------------------------
+set_discord_webhook() {
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}         Configure Alertmanager Discord Webhook                ${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}1. Create a webhook in Discord:${NC}"
+    echo -e "   Server Settings → Integrations → Webhooks → New Webhook"
+    echo -e ""
+    echo -e "${YELLOW}2. IMPORTANT: append '/slack' to the URL.${NC}"
+    echo -e "   Discord accepts Slack-compatible payloads on that endpoint,"
+    echo -e "   which is what Alertmanager's webhook_configs emits."
+    echo -e ""
+    echo -e "   Final URL must look like:"
+    echo -e "   ${BLUE}https://discord.com/api/webhooks/<ID>/<TOKEN>/slack${NC}"
+    echo ""
+
+    # Read URL securely (hidden input)
+    echo -n "Paste the full Discord webhook URL (with /slack): "
+    read -rs webhook_url
+    echo ""
+
+    if [[ -z "$webhook_url" ]]; then
+        echo -e "${RED}Error: URL cannot be empty${NC}"
+        exit 1
+    fi
+
+    local discord_re='^https://discord(app)?\.com/api/webhooks/'
+    if [[ ! "$webhook_url" =~ $discord_re ]]; then
+        echo -e "${YELLOW}Warning: URL does not look like a Discord webhook${NC}"
+        echo -n "Continue anyway? [y/N]: "
+        read -r confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 1
+        fi
+    fi
+
+    if [[ ! "$webhook_url" =~ /slack$ ]]; then
+        echo -e "${YELLOW}Warning: URL does not end with '/slack' - Alertmanager payloads will be rejected by Discord.${NC}"
+        echo -n "Append '/slack' automatically? [Y/n]: "
+        read -r confirm
+        if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+            webhook_url="${webhook_url%/}/slack"
+            echo -e "${GREEN}✓ URL updated: ${webhook_url%/*}/***/slack${NC}"
+        fi
+    fi
+
+    # Ensure monitoring namespace exists (idempotent)
+    kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+    # Create / update the Secret. `apply` (vs create) means re-running the
+    # command rotates the URL atomically without orphaning the previous Secret.
+    kubectl create secret generic alertmanager-discord-webhook \
+        --namespace monitoring \
+        --from-literal=webhook-url="$webhook_url" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    echo -e "${GREEN}✓ Secret alertmanager-discord-webhook created/updated in monitoring${NC}"
+    echo ""
+    echo -e "${YELLOW}3. Roll Alertmanager so it picks up the new Secret mount:${NC}"
+    echo -e "   ${BLUE}kubectl rollout restart deployment/prometheus-alertmanager -n monitoring${NC}"
+    echo -e "   ${YELLOW}(StatefulSet on some versions: ${NC}${BLUE}kubectl rollout restart statefulset/prometheus-alertmanager -n monitoring${BLUE}${NC}${YELLOW})${NC}"
+    echo ""
+    echo -e "${YELLOW}4. Test the route end-to-end with amtool from inside the pod:${NC}"
+    echo -e "   ${BLUE}kubectl -n monitoring exec deploy/prometheus-alertmanager -- amtool alert add foo severity=warning${NC}"
+    echo -e "   You should see a message in your Discord channel within ~30 seconds."
+}
+
+# -----------------------------------------------------------------------------
 # Print summary
 # -----------------------------------------------------------------------------
 print_summary() {
@@ -364,10 +438,12 @@ usage() {
     echo "Usage: $0 [command]"
     echo ""
     echo "Commands:"
-    echo "  setup     Generate passwords and create Kubernetes Secrets (default)"
-    echo "  show      Display saved credentials"
-    echo "  rotate    Regenerate all passwords (WARNING: will require service restart)"
-    echo "  help      Show this help"
+    echo "  setup                  Generate passwords and create Kubernetes Secrets (default)"
+    echo "  show                   Display saved credentials"
+    echo "  rotate                 Regenerate all passwords (WARNING: will require service restart)"
+    echo "  set-discord-webhook    Create/update the Alertmanager Discord webhook Secret"
+    echo "                         (monitoring/alertmanager-discord-webhook, key: webhook-url)"
+    echo "  help                   Show this help"
     echo ""
     echo "Environment variables:"
     echo "  SECRETS_DIR    Directory to store credentials (default: ~/.k3s-secrets)"
@@ -404,6 +480,9 @@ main() {
             else
                 echo "Aborted."
             fi
+            ;;
+        set-discord-webhook)
+            set_discord_webhook
             ;;
         help|--help|-h)
             usage

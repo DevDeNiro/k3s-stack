@@ -44,11 +44,14 @@ ingress:
   # ingressClassName: nginx
 
 # Datasources auto-provisioning
+# Explicit `uid:` values let dashboards (provisioned via ConfigMap from the app's
+# Helm chart) reference the datasource deterministically across Grafana reinstalls.
 datasources:
   datasources.yaml:
     apiVersion: 1
     datasources:
       - name: Prometheus
+        uid: prometheus
         type: prometheus
         access: proxy
         url: http://prometheus-server.monitoring.svc.cluster.local
@@ -59,6 +62,7 @@ datasources:
           manageAlerts: true
           prometheusType: Prometheus
       - name: Loki
+        uid: loki
         type: loki
         access: proxy
         url: http://loki.monitoring.svc.cluster.local:3100
@@ -69,6 +73,7 @@ datasources:
           # Derived fields can be added later to link traces from log lines
           # (e.g. extract trace_id from log line and link to Tempo).
       - name: Alertmanager
+        uid: alertmanager
         type: alertmanager
         access: proxy
         url: http://prometheus-alertmanager.monitoring.svc.cluster.local
@@ -76,6 +81,29 @@ datasources:
         editable: false
         jsonData:
           implementation: prometheus
+
+# Dashboard sidecar: watches the cluster for ConfigMaps with the label
+# `grafana_dashboard=1` and auto-imports them as Grafana dashboards.
+# This is how application charts (e.g. coterie-webapp) ship their own
+# dashboards without coupling to this monitoring stack.
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    # ALL = pick up dashboards from any namespace (e.g. coterie-webapp-prod).
+    # Restrict if you ever onboard untrusted tenants.
+    searchNamespace: ALL
+    folder: /tmp/dashboards
+    provider:
+      foldersFromFilesStructure: true
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
 
 # Dashboard providers
 dashboardProviders:

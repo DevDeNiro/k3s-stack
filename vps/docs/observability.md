@@ -44,7 +44,7 @@ Credentials are managed via `vps/scripts/export-secrets.sh show grafana`.
 
 All rules live in `vps/values/prometheus.yaml` under `serverFiles.alerting_rules.yml`.
 
-### Pod-level
+### Pod-level (group `kubernetes-pods`)
 - **KubePodCrashLooping** (critical, 5m) — fires when a container is in CrashLoopBackOff. Would have caught the 2026-05-18 incident **in 5 minutes** instead of 48 days.
 - **KubeContainerWaiting** (warning, 10m) — fires when a container is stuck waiting for a non-trivial reason (ImagePullBackOff, ErrImagePull, CreateContainerConfigError…).
 - **KubePodOOMKilled** (warning, 1m) — fires when a container was killed by the kernel OOM killer.
@@ -53,23 +53,59 @@ All rules live in `vps/values/prometheus.yaml` under `serverFiles.alerting_rules
 - **KubeJobFailed** (warning, 5m) — fires when a Job (including ArgoCD PreSync migrations) failed.
 - **KubeContainerHighRestartRate** (warning, 10m) — fires when a container restarts >1/min on average over 15 min.
 
-### Node-level
+### Node-level (group `node-health`)
 - **NodeMemoryPressure** (critical, 5m) — fires when MemAvailable < 10%.
 - **NodeDiskPressure** (warning, 10m) — fires when free space on any filesystem < 10%.
+
+### Application-level (groups `app-*`)
+Ported from `coterie-webapp/docker/observability/alert_rules.yml`. All metrics carry `application="coterie-webapp"` (Micrometer common tag) plus `namespace` (Prometheus relabel), so each alert fires once per `(application, namespace)` pair (i.e. once for alpha and once for prod).
+- **HighP95Latency / CriticalP99Latency** — latency SLO breaches on `http_server_requests_seconds_bucket`.
+- **SlowDatabaseQueries** — mean `r2dbc_pool_acquire_seconds` > 100 ms for 2 minutes.
+- **HighErrorRate / CriticalErrorRate** — 5xx ratio > 1% (warn) / > 5% (crit).
+- **ExternalServiceFailures** — `coterie_external_send_email_failure_total` rate > 0.1/s.
+- **AppScrapeDown** — `up{job="kubernetes-pods", namespace=~"coterie-webapp-.*"} == 0` for >1m (pod is up, but `/actuator/prometheus` is unreachable).
+- **CircuitBreakerOpen / CircuitBreakerHalfOpen / HighRetryRate** — Resilience4j signals.
+- **ConnectionPoolExhausted / ConnectionPoolCritical** — R2DBC pool saturation.
+- **HighJvmMemoryUsage** — heap > 85% for 5m.
 
 To add your own rules, just append entries under the appropriate `groups[].rules` list, then `helm upgrade prometheus prometheus-community/prometheus -n monitoring -f vps/values/prometheus.yaml`.
 
 ## Configuring Discord notifications (Alertmanager)
 
-By default Alertmanager has a single `null` receiver — it groups and stores alerts in its UI but does NOT send them anywhere. To enable Discord:
+The Alertmanager config now ships with a `discord` receiver wired to all `severity=critical|warning` alerts. It reads the webhook URL from a file mounted via `alertmanager.extraSecretMounts` (the Secret is `monitoring/alertmanager-discord-webhook`, key `webhook-url`). Until you create that Secret, Alertmanager will still group and display alerts in its UI, but send attempts will fail silently — it will retry once the Secret appears, no restart required.
 
-1. Create a Discord webhook in your server settings: Server Settings → Integrations → Webhooks → New Webhook. Note its URL (`https://discord.com/api/webhooks/<ID>/<TOKEN>`).
-2. **Important**: append `/slack` to the URL. Discord supports Slack-compatible webhook payloads, which is what Alertmanager's `webhook_configs` emits.
-3. Edit `vps/values/prometheus.yaml`, uncomment the `discord` receiver and the matching route, and replace the URL.
-4. `helm upgrade prometheus prometheus-community/prometheus -n monitoring -f vps/values/prometheus.yaml`.
-5. Verify with `amtool` from inside the alertmanager pod or by triggering a test alert (e.g. `kubectl scale deploy/coterie-webapp -n <ns> --replicas=0` for a few minutes).
+### Create / rotate the webhook (one command)
+```bash
+sudo ./vps/scripts/setup-secrets.sh set-discord-webhook
+```
+The script prompts you for the URL, validates the host, auto-appends `/slack` if missing (Discord rejects Alertmanager's payload format without it), and writes the Secret atomically. Re-running rotates the URL.
 
-For sensitive setups, store the webhook URL in a Kubernetes Secret and reference it via `valueFrom.secretKeyRef` in `alertmanagerFiles` (requires a small adapter — open an issue if you need this).
+### Pick up the new mount
+The Secret is mounted with `optional: true` so Alertmanager doesn't crash if you `helm upgrade` before creating it. Once the Secret exists, kubelet sync will eventually project the file; force it immediately with:
+```bash
+kubectl rollout restart deployment/prometheus-alertmanager -n monitoring
+```
+
+### Verify end-to-end
+```bash
+# Inject a synthetic alert through alertmanager itself:
+kubectl -n monitoring exec deploy/prometheus-alertmanager -- \
+    amtool alert add 'alertname=DiscordTest' severity=warning
+```
+Within ~30 s (`group_wait`), a Slack-formatted message should land in your Discord channel. If nothing arrives, check `kubectl -n monitoring logs deploy/prometheus-alertmanager | grep -i discord` — the most common cause is forgetting the `/slack` suffix.
+
+## Application dashboards (shipped by `coterie-webapp` chart)
+
+The Grafana chart now runs a dashboard sidecar that watches the cluster for ConfigMaps labelled `grafana_dashboard=1` across **all namespaces** (`sidecar.dashboards.searchNamespace: ALL`). This is how application charts deliver their own dashboards without touching this monitoring stack.
+
+The `coterie-webapp` Helm chart ships `Coterie Overview` and `Coterie SLO & Latency` via `helm/coterie-webapp/templates/grafana-dashboards-cm.yaml`. They appear automatically in Grafana under the folder generated from the ConfigMap (no manual import). Datasource UIDs are pinned (`prometheus`, `loki`, `alertmanager`) so the dashboards keep working across Grafana reinstalls.
+
+To add another dashboard:
+1. Drop its `.json` into `coterie-webapp/helm/coterie-webapp/dashboards/`.
+2. `helm upgrade coterie-webapp ...` (or let ArgoCD sync).
+3. Sidecar logs (`kubectl logs -n monitoring deploy/grafana -c grafana-sc-dashboard`) confirm pickup.
+
+If you want to disable shipped dashboards for a deployment, set `monitoring.dashboards.enabled: false` in the chart values.
 
 ## Querying logs (LogQL)
 
