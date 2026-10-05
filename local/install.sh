@@ -130,7 +130,7 @@ detect_installed_services() {
     fi
 
     # Keycloak
-    if check_service_installed "keycloak" "security" "statefulset"; then
+    if check_service_installed "keycloak" "security" "deployment"; then
         echo -e "${GREEN}✓ Keycloak is already installed${NC}"
         keycloak_installed=true
     else
@@ -648,12 +648,12 @@ fi
 echo -e "\n${YELLOW}>>> Configuring Helm repositories...${NC}"
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm repo add hashicorp https://helm.releases.hashicorp.com
-helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
+# kubernetes/dashboard was archived in Jan 2026; old repo URL (kubernetes.github.io) now returns 404.
+helm repo add kubernetes-dashboard https://kubernetes-retired.github.io/dashboard/
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add elastic https://helm.elastic.co
 helm repo add confluentinc https://confluentinc.github.io/cp-helm-charts/
-helm repo add keycloak https://codecentric.github.io/helm-charts
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
 helm repo add minio https://charts.min.io/
 helm repo update
@@ -678,7 +678,7 @@ if [ "$install_postgres" = true ]; then
         --set auth.password="$POSTGRES_PASSWORD" \
         -f values/postgresql.yaml --wait --timeout 300s
 
-    echo -e "${GREEN}PostgreSQL deployed successfully!${NC}" postgresql-nodeport
+    echo -e "${GREEN}PostgreSQL deployed successfully!${NC}"
     echo -e "${YELLOW}PostgreSQL credentials saved to postgres_password.txt${NC}"
 
     # kubectl port-forward -n storage svc/postgresql 5432:5432 # to use for local dev
@@ -782,16 +782,33 @@ if [ "$install_kafka" = true ]; then
 fi
 
 if [ "$install_keycloak" = true ]; then
-    echo -e "\n${YELLOW}>>> Deploying Keycloak...${NC}"
-    helm install keycloak bitnami/keycloak --namespace security --create-namespace \
-        -f values/keycloak.yaml --wait --timeout 300s
+    echo -e "\n${YELLOW}>>> Deploying Keycloak (official image, dev mode)...${NC}"
+    # NOTE: bitnami/keycloak is not part of Bitnami's free-tier image subset
+    # (unlike postgresql/redis), so its pinned image tags 404 on docker.io
+    # since the 2025 Bitnami catalog migration. We use the official image
+    # instead, same approach as vps/manifests/keycloak.yaml.
+    kubectl create namespace security --dry-run=client -o yaml | kubectl apply -f -
 
-    # Get Keycloak admin password
-    KEYCLOAK_PASSWORD=$(kubectl get secret --namespace security keycloak -o jsonpath="{.data.admin-password}" | base64 --decode ; echo)
+    # Generate random password for Keycloak admin if not already created
+    if [ ! -f keycloak_password.txt ]; then
+        KEYCLOAK_PASSWORD=$(openssl rand -base64 12)
+        echo "$KEYCLOAK_PASSWORD" > keycloak_password.txt
+        chmod 600 keycloak_password.txt
+    else
+        KEYCLOAK_PASSWORD=$(cat keycloak_password.txt)
+    fi
+
+    kubectl create secret generic keycloak-admin-secret --namespace security \
+        --from-literal=password="$KEYCLOAK_PASSWORD" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl apply -f manifests/keycloak.yaml
+
+    echo -e "${YELLOW}Waiting for Keycloak to be ready (dev mode, first boot can take ~1-2 min)...${NC}"
+    kubectl wait --for=condition=available deployment/keycloak -n security --timeout=300s || true
+
     echo -e "${GREEN}Keycloak deployed successfully!${NC}"
     echo -e "${YELLOW}Keycloak admin password: ${KEYCLOAK_PASSWORD}${NC}"
-    echo "$KEYCLOAK_PASSWORD" > keycloak_password.txt
-    chmod 600 keycloak_password.txt
     echo -e "${GREEN}Keycloak password saved to keycloak_password.txt${NC}"
 fi
 
@@ -850,6 +867,11 @@ if [ "$install_ingress" = true ]; then
     if kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
         ingress_monitoring_enabled="true"
         echo -e "${YELLOW}ServiceMonitor CRD detected, enabling Ingress monitoring...${NC}"
+        # values/ingress-nginx.yaml pins the ServiceMonitor to the "monitoring"
+        # namespace, which only exists if Prometheus/Grafana were installed.
+        # Create it here too so the release doesn't fail when the CRD is
+        # present (e.g. from a previous run) but monitoring wasn't selected.
+        kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
     else
         echo -e "${YELLOW}No ServiceMonitor CRD detected, deploying Ingress without monitoring...${NC}"
     fi
@@ -1095,7 +1117,7 @@ fi
 if [ "$install_postgres" = true ]; then
     echo -e "\n${GREEN}=== Database Service Access ===${NC}"
     echo -e "${YELLOW}Access PostgreSQL${NC}"
-    echo -e "${YELLOW}Run: kubectl port-forward svc/postgresql 5432:5432 -n database${NC}"
+    echo -e "${YELLOW}Run: kubectl port-forward svc/postgresql 5432:5432 -n storage${NC}"
     echo -e "${YELLOW}Connection: postgresql://myapp:$(cat postgres_password.txt)@localhost:5432/myapp${NC}"
     echo -e "${YELLOW}Admin connection: postgresql://postgres:$(cat postgres_password.txt)@localhost:5432/postgres${NC}"
 fi
@@ -1103,9 +1125,9 @@ fi
 if [ "$install_redis" = true ]; then
     echo -e "\n${GREEN}=== Cache Service Access ===${NC}"
     echo -e "${YELLOW}Access Redis${NC}"
-    echo -e "${YELLOW}Run: kubectl port-forward svc/redis-master 6379:6379 -n cache${NC}"
+    echo -e "${YELLOW}Run: kubectl port-forward svc/redis-master 6379:6379 -n storage${NC}"
     echo -e "${YELLOW}Connection: redis://localhost:6379 (password: $(cat redis_password.txt))${NC}"
-    echo -e "${YELLOW}Redis CLI: kubectl exec -it svc/redis-master -n cache -- redis-cli -a $(cat redis_password.txt)${NC}"
+    echo -e "${YELLOW}Redis CLI: kubectl exec -it svc/redis-master -n storage -- redis-cli -a $(cat redis_password.txt)${NC}"
 fi
 
 if [ "$install_keycloak" = true ]; then

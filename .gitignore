@@ -15,4 +15,10 @@ dashboard_portforward.pid
 *.iml
 .idea/
 
-kubeseal--linux-amd64.tar.gz
+# Stray downloaded archives
+kubeseal-*.tar.gz
+
+# Investigation/debug artifacts accidentally committed in the past
+/Healthy
+/Unknown
+/log.txt
