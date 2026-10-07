@@ -1,0 +1,56 @@
+# =============================================================================
+# Local Namespaces Mirror (Matches VPS)
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: nginx-gateway
+    labels:
+        app.kubernetes.io/name: nginx-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/managed-by: k3s-local
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: database
+    labels:
+        app.kubernetes.io/name: database
+        app.kubernetes.io/component: infrastructure
+        app.kubernetes.io/managed-by: k3s-local
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: storage
+    labels:
+        app.kubernetes.io/name: storage
+        app.kubernetes.io/component: infrastructure
+        app.kubernetes.io/managed-by: k3s-local
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: security
+    labels:
+        app.kubernetes.io/name: security
+        app.kubernetes.io/component: infrastructure
+        app.kubernetes.io/managed-by: k3s-local
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: argocd
+    labels:
+        app.kubernetes.io/name: argocd
+        app.kubernetes.io/component: gitops
+        app.kubernetes.io/managed-by: k3s-local
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: monitoring
+    labels:
+        app.kubernetes.io/name: monitoring
+        app.kubernetes.io/component: infrastructure
+        app.kubernetes.io/managed-by: k3s-local

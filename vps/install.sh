@@ -191,7 +191,7 @@ setup_helm_repos() {
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo add grafana https://grafana.github.io/helm-charts
     helm repo add argo https://argoproj.github.io/argo-helm
-    helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+    helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
     
     # Note: NGINX Gateway Fabric uses OCI registry (oci://ghcr.io/nginx/charts/nginx-gateway-fabric)
     # No need to add a traditional Helm repo for it

@@ -19,6 +19,9 @@ help:
 local-install:
 	@./local/install.sh
 
+local-deploy-apps:
+	@./local/deploy-app.sh
+
 local-uninstall:
 	@./local/uninstall.sh
 

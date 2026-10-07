@@ -1,143 +1,111 @@
-# Local Kubernetes Stack with K3d
+# Local Kubernetes Stack (VPS Mirror on K3d)
 
-Production-like Kubernetes environment using [k3d](https://k3d.io/) + [K3s](https://k3s.io/) for local development.
+A production-parity Kubernetes environment using [k3d](https://k3d.io/) + [K3s](https://k3s.io/) mirroring the VPS architecture.
 
-**One script setup. Clean URLs. No port-forwarding needed.**
+**Identical routing (Gateway API), GitOps (Argo CD), storage, and secret controllers. What works locally works on the VPS.**
 
 ---
 
-## What You Get
+## Architecture Parity Matrix
 
-| Service        | Purpose                        | URL                             |
-|----------------|--------------------------------|---------------------------------|
-| **Keycloak**   | Identity & Access Management   | `http://keycloak.local:30080`   |
-| **Grafana**    | Monitoring Dashboards          | `http://grafana.local:30080`    |
-| **Prometheus** | Metrics Collection             | `http://prometheus.local:30080` |
-| **Vault**      | Secrets Management             | `http://vault.local:30080`      |
-| **MinIO**      | Object Storage (S3-compatible) | `http://minio.local:30080`      |
-| **Kafka + UI** | Message Streaming & Management | `http://kafka-ui.local:30080`   |
-| **Dashboard**  | Cluster Management             | `https://localhost:8443`        |
-
-> **ℹ️ Dashboard Access Note**  
-> The Kubernetes Dashboard runs on `https://localhost:8443` via port-forwarding instead of Ingress. This approach
-> provides better security and token validation for local development. Use `./dashboard.sh` to manage port-forwarding
-> easily (start, stop, open browser, get token).
+| Component | Local (k3d) | VPS (k3s) | Notes |
+|-----------|-------------|-----------|-------|
+| **K3s Version** | `v1.29.0+k3s1` | `v1.29.0+k3s1` | Pinned exact match |
+| **Traffic Ingress** | Gateway API v1.2.0 + NGINX Gateway Fabric 2.4.1 | Gateway API v1.2.0 + NGINX Gateway Fabric 2.4.1 | `infrastructure-gateway` in `nginx-gateway` namespace |
+| **GitOps** | Argo CD v2.14+ in `argocd` | Argo CD in `argocd` | Dynamic App deployment & sync |
+| **Database** | PostgreSQL in `storage` | PostgreSQL in `storage` | Service: `postgresql.storage.svc.cluster.local:5432` |
+| **Cache/Sessions**| Redis in `database` | Redis in `database` | Service: `redis.database.svc.cluster.local:6379` |
+| **Secrets Engine** | Sealed Secrets in `kube-system` | Sealed Secrets in `kube-system` | Public key exported to `local/secrets/` |
+| **IAM** (Optional) | Keycloak in `security` | Keycloak in `security` | Service: `keycloak.security.svc.cluster.local:8080` |
 
 ---
 
 ## Prerequisites
 
 - **Docker Desktop** (running)
-- **k3d** ≥ v5.0 – [Install](https://k3d.io/#installation)
-- **kubectl** – [Install](https://kubernetes.io/docs/tasks/tools/)
+- **k3d** (v5.8+) : `scoop install k3d` or `winget install Rancher.k3d`
+- **helm** (v3.14+) : `scoop install helm` or `winget install Helm.Helm`
+- **kubectl** : bundled with Docker Desktop or `winget install Kubernetes.kubectl`
 
 ---
-
-## CI Lint Job
-
-A CI lint job is configured in `.gitlab-ci.yml` to validate Helm charts before deployment:
-
-- **Run Locally**:
-  ```bash
-  make helm-test      # Full lint + template validation
-  make helm-lint      # Just lint the charts
-  make helm-template  # Validate template generation
-  ```
 
 ## Quick Start
 
+### 1. Install / Launch the Mirror Stack
 ```bash
-# 1. Install everything
-./install.sh
+# Minimal stack (Gateway API, Argo CD, Postgres, Redis, Sealed Secrets) - recommended
+./local/install.sh --minimal
 
-# 2. Setup clean URLs  
-./deploy-ingress.sh
+# Full stack (including Keycloak and Prometheus/Grafana)
+./local/install.sh --all
+
+# Or with Makefile
+make local-install
 ```
 
-```
-# Use the following command to Stop & Start the cluster :
+### 2. Deploy Reference Applications
+```bash
+# Deploys:
+# - react-starter-kit (Frontend) -> http://react-starter-kit.local
+# - coterie-webapp (Backend)    -> http://coterie.local
+./local/deploy-app.sh --all
 
-k3d cluster stop dev-cluster
-k3d cluster start dev-cluster
+# Or via Makefile
+make local-deploy-apps
+```
+
+### 3. Configure Local Hostnames
+Add the following line to `C:\Windows\System32\drivers\etc\hosts` (or `/etc/hosts` on Linux/macOS):
+```text
+127.0.0.1  coterie.local react-starter-kit.local
+```
+
+Test immediately:
+```bash
+curl -i -H "Host: coterie.local" http://localhost/
+curl -i -H "Host: react-starter-kit.local" http://localhost/
 ```
 
 ---
 
-### ℹ️ Database Access - PostgreSQL & Redis
+## Multi-Cluster Context Switching
 
-**PostgreSQL Access:**
-
-- **CLI**: `kubectl exec -it postgresql-0 -n storage -- psql -U postgres`
-- **Connection from Localhost **: `kubectl port-forward -n storage svc/postgresql 5432:5432`
-- **From cluster**: `postgresql://myapp:PASSWORD@postgresql.storage.svc.cluster.local:5432/myapp`
-
-**Redis Access:**
-
-- **CLI**: `kubectl exec -it redis-master-0 -n storage -- redis-cli`
-- **Connection URL**: `redis://:$(cat redis_password.txt)@localhost:30379`
-- **From cluster**: `redis://:PASSWORD@redis-master.storage.svc.cluster.local:6379`
-
-> Services exposed on NodePort - PostgreSQL: 30432, Redis: 30379
----
-
-### Essential Commands
-
+Your local `~/.kube/config` seamlessly hosts both clusters:
 ```bash
-# Check everything is running
-kubectl get pods -A
+# Switch to Local k3d cluster
+kubectl config use-context k3d-dev-cluster
 
-# View all services
-kubectl get ingress -A
-
-
-# Dashboard management
-./dashboard.sh start    # Start Dashboard port-forward
-./dashboard.sh open     # Open Dashboard in browser
-./dashboard.sh token    # Get access token
-./dashboard.sh status   # Check Dashboard status
-
-# Cleanup
-./uninstall.sh
-
-# Monitor resources usage 
-kubectl top nodes
-kubectl describe nodes
+# Switch back to VPS
+kubectl config use-context default
 ```
 
 ---
 
-### Development Workflow
+## Accessing Services & UIs
 
-1. **Start:** `./install.sh` → Select services to install
-2. **Access:** `./deploy-ingress.sh` → Get clean URLs
-3. **Develop:** Use supporting services (auth, monitoring, storage)
-4. **Deploy:** Add your apps to the cluster
-5. **Cleanup:** `./uninstall.sh`
+- **Argo CD UI**:
+  ```bash
+  kubectl port-forward -n argocd svc/argocd-server 8443:80
+  # Open http://localhost:8443
+  # Username: admin
+  # Password in: local/argocd_password.txt
+  ```
+
+- **PostgreSQL CLI**:
+  ```bash
+  kubectl exec -it -n storage postgresql-0 -- psql -U postgres
+  ```
+
+- **Redis CLI**:
+  ```bash
+  kubectl exec -it -n database deploy/redis -- redis-cli
+  ```
 
 ---
 
-### Quick Fixes
-
-**Ingress not working?**
-
+## Cleanup / Teardown
 ```bash
-kubectl get svc -n ingress-nginx
-grep "local" /etc/hosts
+./local/uninstall.sh
+# or
+k3d cluster delete dev-cluster
 ```
-
-**Service down?**
-
-```bash
-kubectl logs -n <namespace> <pod-name>
-kubectl describe pod <pod-name> -n <namespace>
-```
-
-1. Namespaces and Argo CD:
-   • You've defined namespaces under argocd, storage, messaging, security, monitoring, and vault.
-   • There's a default argocd project in local-k3d.yaml for application management.
-2. GitLab CI Configuration:
-   • The GitLab CI script creates directories for each branch slug and sets up Helm values making use of the branch name
-   dynamically.
-3. Ingress and ServiceAccount Management:
-   • Ingress configurations for services seem to follow the discussed pattern.
-   • There is some mention of creating service accounts and RBAC under the argo-cd values file.
