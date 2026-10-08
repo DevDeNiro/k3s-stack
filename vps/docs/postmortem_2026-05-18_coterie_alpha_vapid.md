@@ -110,4 +110,4 @@ coterie-webapp-alpha-646cbd766b-kx9gp  0/1  CrashLoopBackOff  10710 (3m45s ago) 
 - Runbook: [`runbook_pod_crashes.md`](runbook_pod_crashes.md)
 - Observability stack overview: [`observability.md`](observability.md)
 - Previous related postmortem (ArgoCD sync stagnation, same env): [`postmortem_2026-02-14_argocd_sync.md`](postmortem_2026-02-14_argocd_sync.md)
-- Local forensic artifact bundle (operator-side): `C:\Users\oldon\vps-investigation-20260518T133259Z\artifacts\`
+- Local forensic artifact bundle (operator-side): `<operator-home>/vps-investigation-artifacts/`

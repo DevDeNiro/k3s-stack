@@ -38,16 +38,6 @@ confirm() {
 
 # Kill port-forwards if running
 echo -e "\n${YELLOW}Checking for running port-forwards...${NC}"
-if [ -f dashboard_portforward.pid ]; then
-    PID=$(cat dashboard_portforward.pid)
-    if ps -p $PID > /dev/null; then
-        echo -e "${YELLOW}Killing dashboard port-forward (PID: $PID)${NC}"
-        kill $PID || true
-    fi
-    rm -f dashboard_portforward.pid
-fi
-
-# Check other potential port-forwards
 pkill -f "kubectl.*port-forward" >/dev/null 2>&1 || true
 
 # Check if we need to delete helm releases manually
@@ -56,80 +46,51 @@ if command -v helm >/dev/null 2>&1; then
     if confirm "Delete all Helm releases first?" "Y"; then
         echo -e "${YELLOW}Deleting Helm releases...${NC}"
 
-        # Monitor namespace
-        echo -e "${YELLOW}Checking monitoring namespace...${NC}"
+        # Monitoring namespace
         if kubectl get namespace monitoring >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Prometheus, Grafana, and AlertManager...${NC}"
+            echo -e "${YELLOW}Deleting Prometheus and Grafana...${NC}"
             helm uninstall prometheus --namespace monitoring 2>/dev/null || true
             helm uninstall grafana --namespace monitoring 2>/dev/null || true
-            helm uninstall alertmanager --namespace monitoring 2>/dev/null || true
             kubectl delete namespace monitoring --grace-period=0 --force 2>/dev/null || true
         fi
 
-        # Logging namespace
-        echo -e "${YELLOW}Checking logging namespace...${NC}"
-        if kubectl get namespace logging >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Elasticsearch and Kibana...${NC}"
-            helm uninstall elasticsearch --namespace logging 2>/dev/null || true
-            helm uninstall kibana --namespace logging 2>/dev/null || true
-            kubectl delete namespace logging --grace-period=0 --force 2>/dev/null || true
+        # GitOps / ArgoCD namespace
+        if kubectl get namespace argocd >/dev/null 2>&1; then
+            echo -e "${YELLOW}Deleting Argo CD...${NC}"
+            helm uninstall argocd --namespace argocd 2>/dev/null || true
+            kubectl delete namespace argocd --grace-period=0 --force 2>/dev/null || true
         fi
 
-        # Messaging namespace
-        echo -e "${YELLOW}Checking messaging namespace...${NC}"
-        if kubectl get namespace messaging >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Kafka...${NC}"
-            helm uninstall kafka --namespace messaging 2>/dev/null || true
-            kubectl delete namespace messaging --grace-period=0 --force 2>/dev/null || true
+        # Gateway API / NGINX Gateway Fabric namespace
+        if kubectl get namespace nginx-gateway >/dev/null 2>&1; then
+            echo -e "${YELLOW}Deleting NGINX Gateway Fabric...${NC}"
+            helm uninstall nginx-gateway --namespace nginx-gateway 2>/dev/null || true
+            kubectl delete namespace nginx-gateway --grace-period=0 --force 2>/dev/null || true
         fi
 
-        # Security namespace
-        echo -e "${YELLOW}Checking security namespace...${NC}"
+        # Storage (PostgreSQL)
+        if kubectl get namespace storage >/dev/null 2>&1; then
+            echo -e "${YELLOW}Deleting PostgreSQL...${NC}"
+            helm uninstall postgresql --namespace storage 2>/dev/null || true
+            kubectl delete namespace storage --grace-period=0 --force 2>/dev/null || true
+        fi
+
+        # Database (Redis)
+        if kubectl get namespace database >/dev/null 2>&1; then
+            echo -e "${YELLOW}Deleting Redis...${NC}"
+            kubectl delete namespace database --grace-period=0 --force 2>/dev/null || true
+        fi
+
+        # Security (Keycloak)
         if kubectl get namespace security >/dev/null 2>&1; then
             echo -e "${YELLOW}Deleting Keycloak...${NC}"
-            helm uninstall keycloak --namespace security 2>/dev/null || true
             kubectl delete namespace security --grace-period=0 --force 2>/dev/null || true
         fi
 
-        # Vault namespace
-        echo -e "${YELLOW}Checking vault namespace...${NC}"
-        if kubectl get namespace vault >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Vault...${NC}"
-            helm uninstall vault --namespace vault 2>/dev/null || true
-            kubectl delete namespace vault --grace-period=0 --force 2>/dev/null || true
-        fi
-
-        # Ingress namespace
-        echo -e "${YELLOW}Checking ingress namespace...${NC}"
-        if kubectl get namespace ingress >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Ingress Controller and Cert-Manager...${NC}"
-            helm uninstall ingress-nginx --namespace ingress 2>/dev/null || true
-            helm uninstall cert-manager --namespace ingress 2>/dev/null || true
-            kubectl delete namespace ingress --grace-period=0 --force 2>/dev/null || true
-        fi
-
-        # Kubernetes Dashboard namespace
-        echo -e "${YELLOW}Checking kubernetes-dashboard namespace...${NC}"
-        if kubectl get namespace kubernetes-dashboard >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Kubernetes Dashboard...${NC}"
-            helm uninstall kubernetes-dashboard --namespace kubernetes-dashboard 2>/dev/null || true
-            kubectl delete namespace kubernetes-dashboard --grace-period=0 --force 2>/dev/null || true
-        fi
-
-        # Redis namespace
-        echo -e "${YELLOW}Checking redis namespace...${NC}"
-        if kubectl get namespace redis >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting Redis...${NC}"
-            helm uninstall redis --namespace redis 2>/dev/null || true
-            kubectl delete namespace redis --grace-period=0 --force 2>/dev/null || true
-        fi
-
-        # Postgres namespace
-        echo -e "${YELLOW}Checking postgres namespace...${NC}"
-        if kubectl get namespace postgres >/dev/null 2>&1; then
-            echo -e "${YELLOW}Deleting PostgreSQL...${NC}"
-            helm uninstall postgres --namespace postgres 2>/dev/null || true
-            kubectl delete namespace postgres --grace-period=0 --force 2>/dev/null || true
+        # Sealed Secrets
+        if kubectl get namespace kube-system >/dev/null 2>&1; then
+            echo -e "${YELLOW}Deleting Sealed Secrets...${NC}"
+            helm uninstall sealed-secrets --namespace kube-system 2>/dev/null || true
         fi
 
         echo -e "${GREEN}All Helm releases deleted.${NC}"
@@ -154,9 +115,9 @@ else
     echo -e "${RED}k3d command not found. Cannot delete cluster.${NC}"
 fi
 
-# Clean up token files
-echo -e "\n${YELLOW}Cleaning up token files...${NC}"
-for token_file in dashboard_token.txt grafana_password.txt elasticsearch_password.txt keycloak_password.txt; do
+# Clean up password / token files
+echo -e "\n${YELLOW}Cleaning up password files...${NC}"
+for token_file in postgres_password.txt argocd_password.txt keycloak_password.txt; do
     if [ -f "$token_file" ]; then
         echo -e "${YELLOW}Removing $token_file...${NC}"
         rm -f "$token_file"
