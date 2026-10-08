@@ -5,7 +5,7 @@ can use `kubectl`, `k9s`, `helm` and `stern` without SSHing in for every command
 
 End state:
 - Passwordless SSH to `coterie-vps`
-- Local `~/.kube/config` pointing at the VPS (`https://137.74.114.206:6443`)
+- Local `~/.kube/config` pointing at the VPS (`https://<VPS_IP>:6443`)
 - `kubectl get nodes` works from your terminal
 - `k9s` opens a TUI dashboard on the live cluster
 
@@ -37,7 +37,7 @@ ssh-keygen -t ed25519 -C "$env:USERNAME-coterie-vps-$(Get-Date -Format yyyyMMdd)
 
 ```bash
 # macOS / Linux
-cat ~/.ssh/coterie_vps_ed25519.pub | ssh ubuntu@137.74.114.206 \
+cat ~/.ssh/coterie_vps_ed25519.pub | ssh ubuntu@<VPS_IP> \
     'mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
      grep -qxF "$(cat)" ~/.ssh/authorized_keys 2>/dev/null || \
      tee -a ~/.ssh/authorized_keys >/dev/null && \
@@ -47,7 +47,7 @@ cat ~/.ssh/coterie_vps_ed25519.pub | ssh ubuntu@137.74.114.206 \
 ```powershell
 # Windows / PowerShell
 $pubkey = (Get-Content "$env:USERPROFILE\.ssh\coterie_vps_ed25519.pub" -Raw).Trim()
-ssh -o StrictHostKeyChecking=accept-new ubuntu@137.74.114.206 `
+ssh -o StrictHostKeyChecking=accept-new ubuntu@<VPS_IP> `
     "mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qxF '$pubkey' ~/.ssh/authorized_keys 2>/dev/null || echo '$pubkey' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED"
 ```
 
@@ -60,7 +60,7 @@ This lets you type `ssh coterie-vps` instead of the long form.
 # %USERPROFILE%\.ssh\config  (Windows)
 
 Host coterie-vps
-    HostName 137.74.114.206
+    HostName <VPS_IP>
     User ubuntu
     IdentityFile ~/.ssh/coterie_vps_ed25519
     IdentitiesOnly yes
@@ -88,7 +88,7 @@ mkdir -p ~/.kube
 
 # Fetch, rewrite, save
 ssh coterie-vps "sudo cat /etc/rancher/k3s/k3s.yaml" \
-    | sed 's#127\.0\.0\.1#137.74.114.206#' \
+    | sed 's#127\.0\.0\.1#<VPS_IP>#' \
     > ~/.kube/config
 
 chmod 600 ~/.kube/config
@@ -108,7 +108,7 @@ if (Test-Path $kubeconfigPath) {
     Copy-Item $kubeconfigPath "$kubeconfigPath.backup-$(Get-Date -Format yyyyMMddHHmmss)"
 }
 
-$config = (ssh coterie-vps "sudo cat /etc/rancher/k3s/k3s.yaml") -replace '127\.0\.0\.1', '137.74.114.206'
+$config = (ssh coterie-vps "sudo cat /etc/rancher/k3s/k3s.yaml") -replace '127\.0\.0\.1', '<VPS_IP>'
 [System.IO.File]::WriteAllText(
     $kubeconfigPath,
     (($config -join "`n") + "`n"),
@@ -207,7 +207,7 @@ Inside k9s, you can switch with `:ctx`.
 
 ## Troubleshooting
 
-### `Unable to connect to the server: dial tcp 137.74.114.206:6443: i/o timeout`
+### `Unable to connect to the server: dial tcp <VPS_IP>:6443: i/o timeout`
 
 The VPS firewall blocks 6443. SSH in and open it:
 

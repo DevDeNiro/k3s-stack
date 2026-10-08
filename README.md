@@ -38,8 +38,8 @@ git clone https://github.com/DevDeNiro/k3s-stack.git && cd k3s-stack
 ### Local (Development)
 
 ```bash
-./local/install.sh
-./local/deploy-ingress.sh
+./local/install.sh --minimal
+./local/deploy-app.sh --all
 ```
 
 → See [`local/README.md`](local/README.md) for details.

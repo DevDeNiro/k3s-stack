@@ -76,9 +76,10 @@ running applications with ArgoCD GitOps.
 **Key files:**
 
 - `vps/install.sh` - Main installation script
-- `vps/argocd/values.yaml` - ArgoCD configuration
-- `vps/postgresql/values.yaml` - PostgreSQL configuration
-- `vps/keycloak/values.yaml` - Keycloak configuration
+- `vps/values/argocd.yaml` - ArgoCD configuration
+- `vps/values/postgresql.yaml` - PostgreSQL configuration
+- `vps/values/keycloak.yaml` - Keycloak configuration
+- `vps/values/nginx-gateway-fabric.yaml` - Gateway API / NGINX Gateway Fabric configuration
 
 ### Phase 2: Ingress & TLS Setup
 
