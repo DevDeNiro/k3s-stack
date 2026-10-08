@@ -4,8 +4,9 @@
 # =============================================================================
 #
 # Generated from template. Do not edit directly.
-# Edit vps/config.env and run: ./vps/apply-config.sh
+# Edit vps/config.env and run: ./vps/scripts/apply-config.sh
 #
+# HTTP-01 challenge is solved via Gateway API (NGINX Gateway Fabric)
 # =============================================================================
 
 ---
@@ -22,9 +23,12 @@ spec:
         privateKeySecretRef:
             name: letsencrypt-staging-key
         solvers:
+            # Gateway API HTTP-01 solver (NGINX Gateway Fabric)
             -   http01:
-                    ingress:
-                        class: nginx
+                    gatewayHTTPRoute:
+                        parentRefs:
+                            -   name: infrastructure-gateway
+                                namespace: nginx-gateway
 
 ---
 # Let's Encrypt Production
@@ -40,6 +44,9 @@ spec:
         privateKeySecretRef:
             name: letsencrypt-prod-key
         solvers:
+            # Gateway API HTTP-01 solver (NGINX Gateway Fabric)
             -   http01:
-                    ingress:
-                        class: nginx
+                    gatewayHTTPRoute:
+                        parentRefs:
+                            -   name: infrastructure-gateway
+                                namespace: nginx-gateway

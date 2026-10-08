@@ -59,8 +59,8 @@ spec:
             annotations:
                 argocd-image-updater.argoproj.io/image-list: "app=${REGISTRY_BASE}/{{repository}}"
                 argocd-image-updater.argoproj.io/app.update-strategy: newest-build
-                # Force usage of immutable SHA tags (avoids "stuck" deployments with mutable 'develop' tag)
-                argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^([a-f0-9]{7,40}|sha-[a-f0-9]{7,40})$"
+                # Only deploy immutable builds created from the develop branch (CI tag develop-<full sha>)
+                argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^develop-[a-f0-9]{40}$"
                 argocd-image-updater.argoproj.io/write-back-method: argocd
                 argocd-image-updater.argoproj.io/app.helm.image-name: image.repository
                 argocd-image-updater.argoproj.io/app.helm.image-tag: image.tag
@@ -152,8 +152,6 @@ spec:
                 server: https://kubernetes.default.svc
                 namespace: "{{repository}}-prod"
             syncPolicy:
-                automated:
-                    prune: true
-                    selfHeal: true
+                # Auto-sync prod désactivé tant que les secrets prod (coterie-webapp-secrets) ne sont pas prêts
                 syncOptions:
                     - CreateNamespace=true
