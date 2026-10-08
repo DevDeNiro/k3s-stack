@@ -4,14 +4,14 @@
 `coterie-webapp-alpha` had been in **CrashLoopBackOff for 48 consecutive days** (since 2026-03-31), totalling **25 833 container restarts** across two ReplicaSets, without anyone noticing. Root cause: the Helm values file shipped a literal placeholder string `<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>` as the value of `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. Spring Boot's WebPush configuration tried to Base64-decode the placeholder at startup, failed with `IllegalArgumentException: Illegal base64 character 3c`, and the entire application context refused to start. ArgoCD's `selfHeal: true` retried **13 762 times** with no chance of converging because the bug was structural.
 
 ## Facts
-| Field | Value |
-|-------|-------|
-| Incident date | 2026-03-31 11:21:13 UTC -> 2026-05-18 (ongoing at investigation) |
-| Detection date | 2026-05-18 (manual operator inquiry; no alert ever fired) |
-| Severity | High (alpha environment, but 0% availability for 48 days) |
-| Component(s) | `coterie-webapp-alpha` (k8s ns), `coterie-webapp` ArgoCD Application, Helm chart `helm/coterie-webapp/values-alpha.yaml` |
-| Detection source | Manual SSH investigation |
-| User-facing impact | `alpha.macoterie.fr` returned 5xx (no upstream pod ready) since 2026-03-31 |
+| Field              | Value                                                                                                                    |
+|--------------------|--------------------------------------------------------------------------------------------------------------------------|
+| Incident date      | 2026-03-31 11:21:13 UTC -> 2026-05-18 (ongoing at investigation)                                                         |
+| Detection date     | 2026-05-18 (manual operator inquiry; no alert ever fired)                                                                |
+| Severity           | High (alpha environment, but 0% availability for 48 days)                                                                |
+| Component(s)       | `coterie-webapp-alpha` (k8s ns), `coterie-webapp` ArgoCD Application, Helm chart `helm/coterie-webapp/values-alpha.yaml` |
+| Detection source   | Manual SSH investigation                                                                                                 |
+| User-facing impact | `alpha.macoterie.fr` returned 5xx (no upstream pod ready) since 2026-03-31                                               |
 
 ## Timeline (UTC)
 - ~2026-03-30 - PR introducing Web Push merged into `develop`. `values-alpha.yaml` ships `VAPID_PUBLIC_KEY: "<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>"` and a matching private-key placeholder.

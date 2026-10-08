@@ -1,203 +1,188 @@
-# VPS Deployment Guide
+# Guide de Déploiement VPS (Production & Staging)
 
-## Prérequis
-
-**VPS** : Ubuntu 22.04+ / Debian 12 | 4GB+ RAM | 40GB+ SSD | Ports 22, 80, 443, 6443 ouverts
-
-**Local** : `kubectl`, `helm`, accès SSH au VPS
+Ce guide est la référence canonique unique pour déployer et opérer l'infrastructure Kubernetes K3s sur VPS, ainsi que les applications associées (`coterie-webapp`).
 
 ---
 
-## Installation (sur le VPS)
+## 📋 Architecture Résumée
 
-### 1. Cloner et installer
+| Composant | Technologie | Namespace | Rôle |
+| :--- | :--- | :--- | :--- |
+| **Runtime** | K3s `v1.29.0+k3s1` mono-nœud | - | Moteur Kubernetes allégé (~500MB) |
+| **Routing / Ingress** | Gateway API v1.2.0 + NGINX Gateway Fabric 2.4.1 | `nginx-gateway` | Point d'entrée HTTP (80) & HTTPS (443) mutualisé |
+| **TLS / Certificats** | Cert-Manager (Let's Encrypt HTTP-01) | `cert-manager` | Certificats automatiques par sous-domaine |
+| **Base de Données** | PostgreSQL (Bitnami) | `storage` | Instance mutualisée avec bases & users logiques dédiés |
+| **Cache & Sessions** | Redis | `database` | Rate-limiting & cache session |
+| **IAM / Auth** | Keycloak | `security` | Multi-realms (`coterie-alpha`, `coterie-prod`) |
+| **GitOps** | Argo CD + Image Updater | `argocd` | Déploiement continu automatisé depuis Git |
+| **Secrets Chiffrés** | Sealed Secrets | `kube-system` | Déchiffrement in-cluster des secrets versionnés |
+| **Observabilité** | Prometheus + Loki + Grafana | `monitoring` | Métriques, alertes et logs centralisés |
 
+---
+
+## 🚀 Étape 1 : Installation du Cluster sur le VPS
+
+### 1.1 Cloner et préparer la configuration
+Connectez-vous au VPS :
 ```bash
-ssh root@<VPS-IP>
-git clone https://github.com/DevDeNiro/k3s-stack.git
-cd k3s-stack
+ssh ubuntu@<VPS_IP>
+cd /home/ubuntu
+git clone https://github.com/DevDeNiro/k3s-stack.git && cd k3s-stack
 
-# 1. Éditer config.env avec TES valeurs
+# Éditer config.env avec votre domaine et emails
+cp vps/config.env.example vps/config.env
 nano vps/config.env
+```
 
+Variables obligatoires dans `vps/config.env` :
+- `DOMAIN="macoterie.fr"`
+- `LETSENCRYPT_EMAIL="admin@macoterie.fr"`
+- `SCM_PROVIDER="github"`
+- `SCM_ORGANIZATION="coterie-app"`
+- `REGISTRY_BASE="ghcr.io/coterie-app"`
+
+### 1.2 Lancer le script d'installation
+```bash
 chmod +x vps/install.sh
 sudo ./vps/install.sh
 ```
 
-> Installe : K3s, Helm, Gateway API (NGINX Gateway Fabric), PostgreSQL, Redis, Keycloak, Prometheus, Grafana, ArgoCD,
-> Sealed Secrets
+Ce script déploie les briques d'infrastructure, génère les mots de passe sécurisés dans `/root/.k3s-secrets/credentials.env`, installe Gateway API, PostgreSQL, Redis, Keycloak, Prometheus, Grafana, Loki et ArgoCD.
 
-**Variables importantes dans `config.env` :**
+---
 
-- `DOMAIN` : ton domaine (ex: `example.com`)
-- `LETSENCRYPT_EMAIL` : email pour Let's Encrypt
-- `SCM_ORGANIZATION` : ton organisation GitHub/GitLab
-- `REGISTRY_BASE` : base URL de ton registry (ex: `ghcr.io/your-org`)
+## 🔒 Étape 2 : Configuration TLS & Gateway API
 
-### 2. Configurer TLS (cert-manager)
-
+### 2.1 Configurer Cert-Manager (Let's Encrypt)
 ```bash
-sudo ./vps/scripts/setup-cert-manager.sh --email admin@yourdomain.com
+sudo ./vps/scripts/setup-cert-manager.sh --email admin@macoterie.fr
 ```
 
-### 3. Configurer Gateway API
-
+### 2.2 Déployer l'Infrastructure Gateway
 ```bash
-sudo ./vps/scripts/setup-gateway-api.sh --domain yourdomain.com
+sudo ./vps/scripts/setup-gateway-api.sh --domain macoterie.fr
 ```
 
-### 4. Configurer CoreDNS (hairpin NAT)
-
+### 2.3 Résolution interne (Hairpin NAT CoreDNS)
+Permet aux pods internes de contacter `auth.macoterie.fr` sans sortir sur Internet :
 ```bash
-sudo ./vps/scripts/setup-coredns-hosts.sh --domain yourdomain.com
+sudo ./vps/scripts/setup-coredns-hosts.sh --domain macoterie.fr
 ```
 
-> Configure CoreDNS pour résoudre `auth.<domain>` vers Keycloak en interne.
-> Nécessaire pour que les pods puissent accéder à Keycloak via l'URL externe.
+---
 
-### 5. Configurer DNS
+## 🔑 Étape 3 : Token SCM pour ArgoCD (GitOps)
 
-```
-*.yourdomain.com    A    <VPS-IP>
-```
-
-### 6. Configurer le token SCM (GitHub/GitLab)
-
+Pour qu'ArgoCD puisse lire vos dépôts privés (GitHub / GitLab) :
 ```bash
 sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
 ```
+Renseignez votre organisation et un Personal Access Token (PAT) avec droits `repo`.
 
-### 7. Onboarder une application
+---
+
+## 📦 Étape 4 : Onboarding d'une Application
+
+Le script d'onboarding crée les namespaces, bases de données logiques, users PostgreSQL et secrets de base :
 
 ```bash
-# Avec subdomains par défaut (alpha.domain, app.domain)
-sudo ./vps/scripts/onboard-app.sh <app-name>
-
-# Avec subdomains personnalisés
-SUBDOMAIN_ALPHA=staging SUBDOMAIN_PROD=www sudo ./vps/scripts/onboard-app.sh <app-name>
-
-# Sans configuration Gateway (si déjà fait manuellement)
-SKIP_GATEWAY=true sudo ./vps/scripts/onboard-app.sh <app-name>
+sudo ./vps/scripts/onboard-app.sh coterie-webapp
 ```
 
-> Crée automatiquement :
-> - Namespaces `<app>-alpha` et `<app>-prod` avec ResourceQuotas
-> - Databases PostgreSQL séparées par environnement
-> - Certificats TLS (Let's Encrypt HTTP-01)
-> - Listeners HTTPS sur le Gateway
-> - Secrets GHCR et ServiceAccounts CI/CD
+Ce script génère automatiquement :
+- Les namespaces `coterie-webapp-alpha` et `coterie-webapp-prod` avec ResourceQuotas.
+- Les bases PostgreSQL `coterie-webapp-alpha` et `coterie-webapp-prod` dans l'instance partagée `storage`.
+- Les certificats Let's Encrypt et listeners HTTPS sur le Gateway (`alpha.macoterie.fr` et `app.macoterie.fr`).
+- Les identifiants sauvegardés dans `/root/.k3s-secrets/coterie-webapp.env`.
 
-### 8. Exporter le certificat Sealed Secrets
+---
 
+## 🔐 Étape 5 : Chiffrement Sealed Secrets (Poste Développeur)
+
+Les mots de passe de production ne doivent jamais être commis en clair. On utilise la clé publique du cluster pour sceller les secrets :
+
+1. **Récupérer la clé publique du cluster VPS :**
+   ```bash
+   sudo ./vps/scripts/export-secrets.sh export-cert /tmp/sealed-secrets-pub.pem
+   # Sur votre laptop :
+   scp ubuntu@<VPS_IP>:/tmp/sealed-secrets-pub.pem local/secrets/sealed-secrets-pub.pem
+   ```
+
+2. **Générer les SealedSecrets pour chaque environnement :**
+   Dans le dépôt de l'application (`coterie-webapp`), utilisez le script dédié :
+   ```bash
+   # Alpha / Staging
+   ./scripts/seal-secrets.sh all coterie-webapp-alpha --cert local/secrets/sealed-secrets-pub.pem
+   # Copier les valeurs chiffrées dans helm/coterie-webapp/values-alpha.yaml
+
+   # Production
+   ./scripts/seal-secrets.sh all coterie-webapp-prod --cert local/secrets/sealed-secrets-pub.pem
+   # Copier les valeurs chiffrées dans helm/coterie-webapp/values-prod.yaml
+   ```
+
+3. **Nommage explicite des secrets :**
+   - `coterie-alpha-db` dans `values-alpha.yaml`
+   - `coterie-prod-db` dans `values-prod.yaml`
+   - `keycloak-client` dans les deux environnements
+
+---
+
+## 👥 Étape 6 : Stratégie IAM & Données (Zéro Onboarding en Alpha)
+
+### Environnement Alpha / Staging (`alpha.macoterie.fr`)
+- **Base de données** : Le profil `alpha` exécute automatiquement `DataSeeder.kt` au premier démarrage pour peupler la fausse résidence démo, le syndic, le manager et les résidents.
+- **Keycloak** : Le realm `coterie-alpha` dispose des 4 comptes de test pré-validés (`emailVerified: true`, mot de passe: `admin123`) :
+  - `admin@coterie.localhost` (Super Admin)
+  - `syndic@coterie.localhost` (Org Admin / Cabinet Les Lilas)
+  - `manager@coterie.localhost` (Gestionnaire)
+  - `resident@coterie.localhost` (Résident)
+  👉 **Connexion immédiate sans aucun onboarding manuel.**
+
+### Environnement Production (`macoterie.fr` / `app.macoterie.fr`)
+- `DataSeeder` est **désactivé** (`SPRING_PROFILES_ACTIVE=prod`).
+- Le realm `coterie-prod` ne contient aucun faux compte. Seuls les vrais clients s'y inscrivent via le flux d'onboarding officiel.
+
+---
+
+## 🛠️ Commandes Utiles & Maintenance
+
+### Diagnostic rapide du cluster
 ```bash
-sudo ./vps/scripts/export-secrets.sh export-cert /tmp/sealed-secrets-pub.pem
-```
-
-### 9. Vérifier l'installation
-
-```bash
+# Vérifier tous les pods
 sudo kubectl get pods -A
-sudo kubectl get gateways -n nginx-gateway
+
+# Voir l'état de synchronisation ArgoCD
+sudo kubectl get applications -n argocd
+
+# Statut des routes Gateway API
+sudo kubectl get httproutes -A
+
+# Statut des certificats Let's Encrypt
 sudo kubectl get certificates -A
 ```
 
----
-
-## Configuration locale
-
-### 1. Récupérer le certificat Sealed Secrets
-
+### Rotation des mots de passe
 ```bash
-mkdir -p ~/.k3s-secrets
-scp ubuntu@<VPS_IP>:/tmp/sealed-secrets-pub.pem ~/.k3s-secrets/
-ssh ubuntu@<VPS_IP> "rm /tmp/sealed-secrets-pub.pem"
+sudo ./vps/scripts/setup-secrets.sh rotate
 ```
 
-### 2. Récupérer les credentials DB
-
+### Désinstallation propre
 ```bash
-# Sur le VPS
-sudo ./vps/scripts/export-secrets.sh show <app-name>
-```
+# Suppression des releases et données applicatives (garde K3s)
+sudo ./vps/uninstall.sh
 
-### 3. Générer les Sealed Secrets (dans votre app)
-
-```bash
-export SEALED_SECRETS_CERT=~/.k3s-secrets/sealed-secrets-pub.pem
-export PG_PASSWORD="<password-from-step-2>"
-
-./scripts/seal-secrets.sh all <app-name>-alpha --cert $SEALED_SECRETS_CERT
-```
-
-### 4. Commit & push
-
-```bash
-git add helm/
-git commit -m "chore: add sealed secrets"
-git push
+# Suppression intégrale du cluster K3s
+sudo ./vps/uninstall.sh --all
 ```
 
 ---
 
-## Accès aux services
+## 🔄 ArgoCD Auto-Discovery
 
-### Port-forward (admin)
-
-```bash
-# Grafana
-sudo kubectl port-forward -n monitoring svc/grafana 3000:80
-
-# Keycloak Admin
-sudo kubectl port-forward -n security svc/keycloak 8080:80
-
-# ArgoCD
-sudo kubectl port-forward -n argocd svc/argocd-server 8443:443
-
-# Prometheus
-sudo kubectl port-forward -n monitoring svc/prometheus-server 9090:80
-```
-
-### SSH tunnel (depuis local)
-
-```bash
-ssh -L 8080:localhost:8080 ubuntu@<VPS_IP> "sudo kubectl port-forward -n security svc/keycloak 8080:80"
-```
-
-### URLs publiques (Gateway API)
-
-| Service        | URL                                    | Notes                        |
-|----------------|----------------------------------------|------------------------------|
-| Keycloak OAuth | `https://auth.yourdomain.com/realms/*` | /admin bloqué (port-forward) |
-| App Alpha      | `https://alpha.yourdomain.com`         | Environnement staging        |
-| App Prod       | `https://app.yourdomain.com`           | Environnement production     |
-
-> **Note** : Les certificats sont émis par Let's Encrypt via HTTP-01 challenge (pas de wildcard).
-
----
-
-## Credentials
-
-```bash
-# Voir tous les credentials
-sudo ./vps/scripts/export-secrets.sh show
-
-# Credential spécifique
-sudo ./vps/scripts/export-secrets.sh show grafana
-sudo ./vps/scripts/export-secrets.sh show keycloak
-sudo ./vps/scripts/export-secrets.sh show argocd
-```
-
----
-
-## ArgoCD Auto-Discovery
-
-L'installation configure automatiquement l'auto-découverte des applications via ApplicationSets.
-
-### Fonctionnement
-
-1. ArgoCD scanne ton organisation GitHub/GitLab
-2. Les repos avec un dossier `helm/` sont détectés automatiquement
-3. Deux Applications sont créées : `<repo>-alpha` (branche develop) et `<repo>-prod` (branche main)
+L'installation configure automatiquement l'auto-découverte des applications via ApplicationSets :
+1. ArgoCD scanne votre organisation GitHub/GitLab.
+2. Les dépôts contenant un dossier `helm/` sont détectés automatiquement.
+3. Deux Applications sont créées par dépôt détecté : `<repo>-alpha` (branche `develop`) et `<repo>-prod` (branche `main`).
 
 ### Prérequis pour un repo
 

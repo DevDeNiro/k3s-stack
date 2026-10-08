@@ -159,7 +159,7 @@ running applications with ArgoCD GitOps.
 
 ### Phase 4: Application Onboarding
 
-**Script:** `vps/scripts/onboard-app.sh <app-name>`
+**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--skip-cicd]`
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -168,8 +168,8 @@ running applications with ArgoCD GitOps.
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Create Namespaces:  │
-                   │  - <app>-alpha       │
+                   │ Create selected ns:  │
+                   │  - <app>-alpha and/or│
                    │  - <app>-prod        │
                    │  (with ResourceQuota │
                    │   and LimitRange)    │
@@ -178,9 +178,8 @@ running applications with ArgoCD GitOps.
                               ▼
                    ┌──────────────────────┐
                    │  Create PostgreSQL   │
-                   │  databases & users:  │
-                   │  - <app>-alpha       │
-                   │  - <app>-prod        │
+                   │ databases & users    │
+                   │ for selected env(s)  │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -194,9 +193,9 @@ running applications with ArgoCD GitOps.
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Create CI/CD        │
-                   │  ServiceAccounts &   │
-                   │  Kubeconfigs         │
+                   │  Create CI/CD access │
+                   │  unless --skip-cicd  │
+                   │  (SAs & kubeconfigs) │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -212,6 +211,15 @@ running applications with ArgoCD GitOps.
 - Database credentials in `/root/.k3s-secrets/<app>.env`
 - Kubeconfigs in `/root/.k3s-secrets/kubeconfigs/`
 - Secrets created directly in namespaces (not SealedSecrets)
+
+For a production-only GitOps onboarding, target prod explicitly and skip the deployer RBAC/kubeconfigs:
+
+```bash
+sudo ./vps/scripts/onboard-app.sh coterie-webapp --environment prod --skip-cicd
+```
+
+The script preserves a known PostgreSQL password and refuses to rotate an existing account when its password is
+unavailable or inconsistent. Do not rerun the broad `all` scope for a single-environment repair.
 
 ### Phase 5: Sealed Secrets Generation (Developer Machine)
 
@@ -240,8 +248,9 @@ running applications with ArgoCD GitOps.
                    ┌──────────────────────┐
                    │  Create SealedSecret │
                    │  using kubeseal:     │
-                   │  - postgresql creds  │
+                   │  - PostgreSQL password│
                    │  - keycloak client   │
+                   │  - Turnstile/VAPID   │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -255,9 +264,35 @@ running applications with ArgoCD GitOps.
 **Note:** `ghcr-secret` is NOT a SealedSecret - it's created by `onboard-app.sh` to avoid chicken-and-egg issues with
 PreSync hooks.
 
+For Coterie's production application keys, run this from the `coterie-webapp` checkout. The script prompts without
+echoing the values and writes only encrypted values:
+
+```bash
+./scripts/seal-secrets.sh application coterie-webapp-prod \
+    --cert ~/.k3s-secrets/sealed-secrets-pub.pem \
+    --output /tmp/coterie-webapp-prod-sealed-values.yaml
+```
+
+Merge the generated `sealedSecrets.application` block into
+`helm/coterie-webapp/values-prod.yaml`. Do not put raw Turnstile or VAPID values in Git or chat.
+If onboarding created a new database password, seal that exact password with the hidden prompt and update the
+`sealedSecrets.postgresql.encryptedData` value before allowing ArgoCD to sync.
+
 ### Phase 6: ArgoCD Application Deployment
 
-**Trigger:** Git push to repository (or manual sync)
+**Trigger:** Git push starts the application build; Argo CD Image Updater polls GHCR for the branch-qualified immutable
+image tag, and ArgoCD automated sync deploys the updated tag. Image Updater polls the registry; it is not a build
+webhook.
+
+The configured tags are `develop-<full-sha>` for Alpha and `main-<full-sha>` for production; this prevents one branch's
+build from being selected into the other environment.
+
+After changing the ApplicationSet template on an existing VPS, regenerate and apply the manifest:
+
+```bash
+./vps/scripts/apply-config.sh
+sudo kubectl apply -f vps/manifests/argocd-autodiscover.yaml
+```
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐

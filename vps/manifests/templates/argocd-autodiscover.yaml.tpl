@@ -128,8 +128,8 @@ spec:
             annotations:
                 argocd-image-updater.argoproj.io/image-list: "app=${REGISTRY_BASE}/{{repository}}"
                 argocd-image-updater.argoproj.io/app.update-strategy: newest-build
-                # Prod: Allow SemVer (v1.0.0) AND immutable SHA (continuous deployment), but BAN 'latest'
-                argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^(v?[0-9]+\\.[0-9]+\\.[0-9]+.*|sha-[a-f0-9]{7,40})$"
+                # Only deploy immutable builds created from the main branch
+                argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^main-[a-f0-9]{40}$"
                 argocd-image-updater.argoproj.io/write-back-method: argocd
                 argocd-image-updater.argoproj.io/app.helm.image-name: image.repository
                 argocd-image-updater.argoproj.io/app.helm.image-tag: image.tag
@@ -147,10 +147,13 @@ spec:
                         -   name: image.repository
                             value: "${REGISTRY_BASE}/{{repository}}"
                         -   name: image.tag
-                            value: latest
+                            value: main
             destination:
                 server: https://kubernetes.default.svc
                 namespace: "{{repository}}-prod"
             syncPolicy:
+                automated:
+                    prune: true
+                    selfHeal: true
                 syncOptions:
                     - CreateNamespace=true

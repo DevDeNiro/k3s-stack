@@ -3,7 +3,7 @@ set -euo pipefail
 
 # =============================================================================
 # Onboard Application to K3s Stack
-# One-time setup: namespace, database, Keycloak client, secrets, CI/CD access
+# Per-environment setup: namespace, database, secrets, optional CI/CD access
 # =============================================================================
 
 RED='\033[0;31m'
@@ -25,9 +25,12 @@ SECRETS_FILE="${SECRETS_DIR}/credentials.env"
 # =============================================================================
 # Configuration
 # =============================================================================
-APP_NAME="${1:-}"
+APP_NAME=""
+TARGET_ENV="all"
+TARGET_ENVS=()
 SKIP_DATABASE="${SKIP_DATABASE:-false}"
 SKIP_GATEWAY="${SKIP_GATEWAY:-false}"
+SKIP_CICD="${SKIP_CICD:-false}"
 
 # Subdomain overrides (optional)
 # Default: alpha.<domain> for alpha env, app.<domain> for prod env
@@ -38,28 +41,68 @@ SUBDOMAIN_PROD="${SUBDOMAIN_PROD:-app}"
 # Usage
 # =============================================================================
 usage() {
-    echo "Usage: $0 <app-name>"
+    echo "Usage: $0 <app-name> [--environment all|alpha|prod] [--skip-cicd]"
     echo ""
-    echo "Onboard an application to K3s stack (run once per application)."
+    echo "Onboard an application to K3s stack."
     echo ""
     echo "This script creates:"
-    echo "  - Namespaces: <app>-prod and <app>-alpha with resource quotas"
-    echo "  - PostgreSQL database and user"
-    echo "  - Kubernetes secrets in each namespace"
-    echo "  - ServiceAccount and kubeconfig for CI/CD"
+    echo "  - Selected application namespace(s) with resource quotas"
+    echo "  - PostgreSQL database, user, and Secret when missing"
+    echo "  - GHCR and Gateway TLS resources for selected environment(s)"
     echo ""
-    echo "Options (via environment variables):"
+    echo "Options:"
+    echo "  --environment ENV     Target all, alpha, or prod (default: all)"
+    echo "  --skip-cicd           Skip deployer ServiceAccounts and kubeconfigs"
+    echo ""
+    echo "Environment variables:"
     echo "  SKIP_DATABASE=true     Skip database creation"
+    echo "  SKIP_GATEWAY=true      Skip Gateway TLS setup"
     echo ""
-echo "Example:"
+    echo "Examples:"
     echo "  $0 myapp"
+    echo "  $0 myapp --environment prod --skip-cicd"
     echo "  SUBDOMAIN_ALPHA=preview SUBDOMAIN_PROD=www $0 myapp"
 }
 
 # =============================================================================
 # Validation
 # =============================================================================
-if [[ -z "$APP_NAME" || "$APP_NAME" == "-h" || "$APP_NAME" == "--help" ]]; then
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --environment|--env)
+            if [[ -z "${2:-}" ]]; then
+                echo -e "${RED}Error: --environment requires all, alpha, or prod${NC}"
+                exit 1
+            fi
+            TARGET_ENV="$2"
+            shift 2
+            ;;
+        --skip-cicd)
+            SKIP_CICD="true"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -*)
+            echo -e "${RED}Error: Unknown option $1${NC}"
+            usage
+            exit 1
+            ;;
+        *)
+            if [[ -n "$APP_NAME" ]]; then
+                echo -e "${RED}Error: Only one app name may be specified${NC}"
+                usage
+                exit 1
+            fi
+            APP_NAME="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$APP_NAME" ]]; then
     usage
     exit 0
 fi
@@ -68,6 +111,27 @@ if [[ ! "$APP_NAME" =~ ^[a-z0-9-]+$ ]]; then
     echo -e "${RED}Error: App name must be lowercase alphanumeric with hyphens only${NC}"
     exit 1
 fi
+
+case "$TARGET_ENV" in
+    all)
+        TARGET_ENVS=(alpha prod)
+        ;;
+    alpha|prod)
+        TARGET_ENVS=("$TARGET_ENV")
+        ;;
+    *)
+        echo -e "${RED}Error: --environment must be all, alpha, or prod${NC}"
+        exit 1
+        ;;
+esac
+
+for flag_name in SKIP_DATABASE SKIP_GATEWAY SKIP_CICD; do
+    flag_value="${!flag_name}"
+    if [[ "$flag_value" != "true" && "$flag_value" != "false" ]]; then
+        echo -e "${RED}Error: ${flag_name} must be true or false${NC}"
+        exit 1
+    fi
+done
 
 # =============================================================================
 # Load config.env for domain and other settings
@@ -120,6 +184,10 @@ load_secrets() {
     
     source "$found_file"
     SECRETS_FILE="$found_file"
+    if [[ -z "${POSTGRES_ADMIN_PASSWORD:-}" ]]; then
+        echo -e "${RED}Error: POSTGRES_ADMIN_PASSWORD is missing from infrastructure secrets${NC}"
+        exit 1
+    fi
     echo -e "${GREEN}✓ Secrets loaded from $found_file${NC}"
 }
 
@@ -130,6 +198,88 @@ generate_password() {
     # Read enough random bytes first to avoid SIGPIPE with pipefail
     head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c "${1:-32}"
 }
+# =============================================================================
+# Database credential helpers
+# =============================================================================
+database_password_key() {
+    local normalized_app_name="${APP_NAME^^}"
+    normalized_app_name="${normalized_app_name//-/_}"
+    printf '%s_%s_DB_PASSWORD' "$normalized_app_name" "${1^^}"
+}
+
+legacy_database_password_key() {
+    printf '%s_%s_DB_PASSWORD' "${APP_NAME^^}" "${1^^}"
+}
+
+read_saved_database_password() {
+    local current_key
+    local legacy_key
+    current_key=$(database_password_key "$1")
+    legacy_key=$(legacy_database_password_key "$1")
+
+    if [[ ! -f "$APP_SECRETS_FILE" ]]; then
+        return 0
+    fi
+
+    awk -F= -v current_key="$current_key" -v legacy_key="$legacy_key" \
+        '$1 == current_key || $1 == legacy_key { sub(/^[^=]*=/, ""); value = $0 } END { if (value != "") print value }' \
+        "$APP_SECRETS_FILE"
+}
+
+save_database_password() {
+    local env="$1"
+    local password="$2"
+    local current_key
+    local legacy_key
+    local temporary_file
+
+    current_key=$(database_password_key "$env")
+    legacy_key=$(legacy_database_password_key "$env")
+    temporary_file=$(mktemp "${APP_SECRETS_FILE}.tmp.XXXXXX")
+
+    if [[ -f "$APP_SECRETS_FILE" ]]; then
+        awk -F= -v current_key="$current_key" -v legacy_key="$legacy_key" \
+            '$1 != current_key && $1 != legacy_key' "$APP_SECRETS_FILE" > "$temporary_file"
+    fi
+
+    printf '%s=%s\n' "$current_key" "$password" >> "$temporary_file"
+    chmod 600 "$temporary_file"
+    mv "$temporary_file" "$APP_SECRETS_FILE"
+}
+
+database_secret_password() {
+    local namespace="$1"
+    kubectl get secret "${APP_NAME}-db" -n "$namespace" -o jsonpath='{.data.password}' 2>/dev/null \
+        | base64 -d 2>/dev/null || true
+}
+
+verify_database_password() {
+    local env="$1"
+    local password="$2"
+    local database="$3"
+    local db_user="${APP_NAME}-${env}"
+
+    kubectl exec -n storage postgresql-0 -- env PGPASSWORD="$password" \
+        psql -h 127.0.0.1 -U "$db_user" -d "$database" -Atqc 'SELECT 1' >/dev/null 2>&1
+}
+
+create_database_secret() {
+    local env="$1"
+    local password="$2"
+    local db_name="${APP_NAME}-${env}"
+    local namespace="${APP_NAME}-${env}"
+
+    kubectl create secret generic "${APP_NAME}-db" \
+        --namespace "$namespace" \
+        --from-literal=host="postgresql.storage.svc.cluster.local" \
+        --from-literal=port="5432" \
+        --from-literal=database="$db_name" \
+        --from-literal=username="$db_name" \
+        --from-literal=password="$password" \
+        --from-literal=url="jdbc:postgresql://postgresql.storage.svc.cluster.local:5432/${db_name}" \
+        --from-literal=r2dbc-url="r2dbc:postgresql://postgresql.storage.svc.cluster.local:5432/${db_name}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+}
 
 # =============================================================================
 # Create namespaces
@@ -137,7 +287,7 @@ generate_password() {
 create_namespaces() {
     echo -e "${YELLOW}>>> Creating namespaces...${NC}"
     
-    for env in prod alpha; do
+    for env in "${TARGET_ENVS[@]}"; do
         local ns="${APP_NAME}-${env}"
         local cpu_req=$( [[ "$env" == "prod" ]] && echo "2" || echo "1" )
         local mem_req=$( [[ "$env" == "prod" ]] && echo "2Gi" || echo "1Gi" )
@@ -208,58 +358,96 @@ create_database() {
     kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql \
         -n storage --timeout=120s
     
-    # Create separate database and user for each environment
-    for env in prod alpha; do
+    # Create or resume a database without rotating existing user passwords.
+    for env in "${TARGET_ENVS[@]}"; do
         local db_name="${APP_NAME}-${env}"
         local db_user="${APP_NAME}-${env}"
-        local db_password
-        db_password=$(generate_password 32)
         local ns="${APP_NAME}-${env}"
+        local role_exists
+        local db_exists
+        local secret_exists="false"
+        local secret_password=""
+        local saved_password=""
+        local db_password=""
+        local auth_database="$db_name"
         
-        echo -e "${YELLOW}>>> Creating database '${db_name}'...${NC}"
-        
-        # Create user and database for this environment
-        kubectl exec -i -n storage postgresql-0 -- env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" psql -U postgres <<EOSQL
-DO \$\$
-BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${db_user}') THEN
-        CREATE USER "${db_user}" WITH PASSWORD '${db_password}';
-    ELSE
-        ALTER USER "${db_user}" WITH PASSWORD '${db_password}';
-    END IF;
-END
-\$\$;
+        role_exists=$(kubectl exec -n storage postgresql-0 -- env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+            psql -v ON_ERROR_STOP=1 -U postgres -Atqc "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${db_user}')")
+        db_exists=$(kubectl exec -n storage postgresql-0 -- env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+            psql -v ON_ERROR_STOP=1 -U postgres -Atqc "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${db_name}')")
+        saved_password=$(read_saved_database_password "$env")
 
+        if kubectl get secret "${APP_NAME}-db" -n "$ns" >/dev/null 2>&1; then
+            secret_exists="true"
+            secret_password=$(database_secret_password "$ns")
+            if [[ -z "$secret_password" ]]; then
+                echo -e "${RED}Error: ${APP_NAME}-db exists in ${ns} without a password key; refusing to change the database user${NC}"
+                return 1
+            fi
+        fi
+
+        if [[ -n "$secret_password" ]]; then
+            db_password="$secret_password"
+        elif [[ -n "$saved_password" ]]; then
+            db_password="$saved_password"
+        fi
+
+        if [[ "$role_exists" == "t" ]]; then
+            if [[ -z "$db_password" ]]; then
+                echo -e "${RED}Error: database user ${db_user} already exists but its password is unavailable; refusing to rotate it${NC}"
+                return 1
+            fi
+
+            if [[ "$db_exists" != "t" ]]; then
+                auth_database="postgres"
+            fi
+
+            if ! verify_database_password "$env" "$db_password" "$auth_database"; then
+                echo -e "${RED}Error: stored credentials for ${db_user} do not authenticate; refusing to rotate them${NC}"
+                return 1
+            fi
+        elif [[ "$db_exists" == "t" && -z "$db_password" ]]; then
+            echo -e "${RED}Error: database ${db_name} exists without a known user password; refusing to alter existing state${NC}"
+            return 1
+        elif [[ -z "$db_password" ]]; then
+            db_password=$(generate_password 32)
+            save_database_password "$env" "$db_password"
+        fi
+
+        echo -e "${YELLOW}>>> Ensuring database '${db_name}'...${NC}"
+
+        if [[ "$role_exists" != "t" ]]; then
+            kubectl exec -i -n storage postgresql-0 -- env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+                psql -v ON_ERROR_STOP=1 -U postgres -v "db_password=$db_password" <<EOSQL
+CREATE USER "${db_user}" WITH PASSWORD :'db_password';
+EOSQL
+        fi
+
+        kubectl exec -i -n storage postgresql-0 -- env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+            psql -v ON_ERROR_STOP=1 -U postgres <<EOSQL
 SELECT 'CREATE DATABASE "${db_name}" OWNER "${db_user}"'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${db_name}')\gexec
 
 GRANT ALL PRIVILEGES ON DATABASE "${db_name}" TO "${db_user}";
 EOSQL
-        
-        echo -e "${GREEN}✓ Database '${db_name}' created${NC}"
-        
-        # Create secret with environment-specific database info
-        kubectl create secret generic "${APP_NAME}-db" \
-            --namespace "$ns" \
-            --from-literal=host="postgresql.storage.svc.cluster.local" \
-            --from-literal=port="5432" \
-            --from-literal=database="$db_name" \
-            --from-literal=username="$db_user" \
-            --from-literal=password="$db_password" \
-            --from-literal=url="jdbc:postgresql://postgresql.storage.svc.cluster.local:5432/${db_name}" \
-            --from-literal=r2dbc-url="r2dbc:postgresql://postgresql.storage.svc.cluster.local:5432/${db_name}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-        
-        echo -e "${GREEN}✓ Database secret created in ${ns}${NC}"
-        
-        # Save password to app secrets file
-        echo "${APP_NAME^^}_${env^^}_DB_PASSWORD=${db_password}" >> "$APP_SECRETS_FILE"
+
+        echo -e "${GREEN}✓ Database '${db_name}' is ready; no existing password was changed${NC}"
+
+        if [[ "$secret_exists" != "true" ]]; then
+            create_database_secret "$env" "$db_password"
+            echo -e "${GREEN}✓ Database secret created in ${ns}${NC}"
+        else
+            echo -e "${GREEN}✓ Database secret in ${ns} is unchanged${NC}"
+        fi
+
+        save_database_password "$env" "$db_password"
     done
     
     echo -e "${GREEN}✓ Passwords saved to $APP_SECRETS_FILE${NC}"
-    echo -e "${YELLOW}⚠ Seal the PostgreSQL secrets in your app repo:${NC}"
-    echo -e "${YELLOW}  ./scripts/seal-secrets.sh postgresql <app>-alpha --cert <cert-path>${NC}"
-    echo -e "${YELLOW}  ./scripts/seal-secrets.sh postgresql <app>-prod --cert <cert-path>${NC}"
+    echo -e "${YELLOW}⚠ Seal the PostgreSQL password in your app repo (enter it at the hidden prompt):${NC}"
+    for env in "${TARGET_ENVS[@]}"; do
+        echo -e "${YELLOW}  ./scripts/seal-secrets.sh postgresql ${APP_NAME}-${env} --cert <cert-path>${NC}"
+    done
 }
 
 # =============================================================================
@@ -279,7 +467,7 @@ create_ghcr_secret() {
         return 0
     fi
     
-    for env in prod alpha; do
+    for env in "${TARGET_ENVS[@]}"; do
         local ns="${APP_NAME}-${env}"
         
         # Create docker-registry secret for GHCR
@@ -300,7 +488,7 @@ create_ghcr_secret() {
 create_cicd_access() {
     echo -e "${YELLOW}>>> Creating CI/CD ServiceAccounts...${NC}"
     
-    for env in prod alpha; do
+    for env in "${TARGET_ENVS[@]}"; do
         local ns="${APP_NAME}-${env}"
         local sa="deployer"
         
@@ -364,7 +552,7 @@ generate_kubeconfigs() {
     
     sleep 2
     
-    for env in prod alpha; do
+    for env in "${TARGET_ENVS[@]}"; do
         local ns="${APP_NAME}-${env}"
         local token
         token=$(kubectl get secret deployer-token -n "$ns" -o jsonpath='{.data.token}' | base64 -d)
@@ -471,7 +659,7 @@ setup_gateway_tls() {
     domain_slug=$(echo "$DOMAIN" | tr '.' '-')
     
     # Create certificates and listeners for each environment
-    for env in alpha prod; do
+    for env in "${TARGET_ENVS[@]}"; do
         local subdomain
         if [[ "$env" == "alpha" ]]; then
             subdomain="$SUBDOMAIN_ALPHA"
@@ -508,7 +696,6 @@ spec:
         - "${hostname}"
 EOF
             echo -e "${GREEN}✓ Certificate created for ${hostname}${NC}"
-            
             # Wait for certificate to be ready
             echo -e "${YELLOW}Waiting for certificate (max 120s)...${NC}"
             local timeout=120
@@ -564,46 +751,37 @@ EOF
 # Summary
 # =============================================================================
 print_summary() {
-    local dir="/root/.k3s-secrets/kubeconfigs"
-    
     echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}         ${APP_NAME} Onboarded!${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     
-    echo -e "\n${YELLOW}Namespaces:${NC} ${APP_NAME}-prod, ${APP_NAME}-alpha"
-    echo -e "${YELLOW}Database:${NC} ${APP_NAME} (PostgreSQL)"
+    echo -e "\n${YELLOW}Environment(s):${NC} ${TARGET_ENVS[*]}"
+    for env in "${TARGET_ENVS[@]}"; do
+        echo -e "  • Namespace: ${APP_NAME}-${env}"
+        echo -e "  • Database: ${APP_NAME}-${env}"
+    done
     
     if [[ "$SKIP_GATEWAY" != "true" && -n "${DOMAIN:-}" ]]; then
         echo -e "\n${YELLOW}Gateway TLS:${NC}"
-        echo -e "  • https://${SUBDOMAIN_ALPHA}.${DOMAIN} → ${APP_NAME}-alpha"
-        echo -e "  • https://${SUBDOMAIN_PROD}.${DOMAIN} → ${APP_NAME}-prod"
+        for env in "${TARGET_ENVS[@]}"; do
+            local subdomain="$SUBDOMAIN_ALPHA"
+            if [[ "$env" == "prod" ]]; then
+                subdomain="$SUBDOMAIN_PROD"
+            fi
+            echo -e "  • https://${subdomain}.${DOMAIN} → ${APP_NAME}-${env}"
+        done
     fi
     
-    echo -e "\n${YELLOW}Secrets in each namespace:${NC}"
-    echo -e "  • ${APP_NAME}-db   → host, port, database, username, password"
-    echo -e "  • ghcr-secret      → Docker registry credentials for GHCR"
-    
-    echo -e "\n${YELLOW}CI/CD Kubeconfigs (secured in /root/):${NC}"
-    echo -e "  Export: sudo ./vps/scripts/export-secrets.sh export-kubeconfig ${APP_NAME} prod /tmp/kc.yaml"
-    echo -e "  Export: sudo ./vps/scripts/export-secrets.sh export-kubeconfig ${APP_NAME} alpha /tmp/kc.yaml"
-    
-    echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}GitLab CI Setup:${NC}"
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e ""
-    echo -e "1. Encode kubeconfig:"
-    echo -e "   ${BLUE}base64 -i ${dir}/${APP_NAME}-alpha.kubeconfig${NC}"
-    echo -e ""
-    echo -e "2. Add to GitLab CI/CD Variables:"
-    echo -e "   KUBECONFIG_ALPHA (masked, protected for alpha branch)"
-    echo -e "   KUBECONFIG_PROD  (masked, protected for main branch)"
-    echo -e ""
-    echo -e "3. .gitlab-ci.yml example:"
-    echo -e "   ${BLUE}deploy:${NC}"
-    echo -e "   ${BLUE}  script:${NC}"
-    echo -e "   ${BLUE}    - echo \"\$KUBECONFIG_ALPHA\" | base64 -d > kubeconfig${NC}"
-    echo -e "   ${BLUE}    - helm upgrade --install ${APP_NAME} ./helm/${APP_NAME}${NC}"
-    echo -e "   ${BLUE}      --kubeconfig kubeconfig -n ${APP_NAME}-alpha${NC}"
+    echo -e "\n${YELLOW}Secrets in selected namespace(s):${NC}"
+    echo -e "  • ${APP_NAME}-db → database password and connection metadata"
+    echo -e "  • ghcr-secret    → Docker registry credentials for GHCR"
+    if [[ "$SKIP_CICD" != "true" ]]; then
+        echo -e "\n${YELLOW}CI/CD Kubeconfigs (secured in /root/):${NC}"
+        for env in "${TARGET_ENVS[@]}"; do
+            echo -e "  • Export: sudo ./vps/scripts/export-secrets.sh export-kubeconfig ${APP_NAME} ${env} /tmp/kc.yaml"
+        done
+        echo -e "${YELLOW}Use these kubeconfigs only if deploying outside ArgoCD.${NC}"
+    fi
 }
 
 # =============================================================================
@@ -611,12 +789,14 @@ print_summary() {
 # =============================================================================
 main() {
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${BLUE}         Onboarding: ${APP_NAME}${NC}"
+    echo -e "${BLUE}         Onboarding: ${APP_NAME} (${TARGET_ENVS[*]})${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     
+    umask 077
     mkdir -p "$SECRETS_DIR"
+    chmod 700 "$SECRETS_DIR"
     APP_SECRETS_FILE="${SECRETS_DIR}/${APP_NAME}.env"
-    : > "$APP_SECRETS_FILE"
+    touch "$APP_SECRETS_FILE"
     chmod 600 "$APP_SECRETS_FILE"  # Only root can read
     
     load_config
@@ -625,7 +805,11 @@ main() {
     create_database
     create_ghcr_secret
     create_argocd_repo_secret  # Allow ArgoCD to clone private repo
-    create_cicd_access
+    if [[ "$SKIP_CICD" != "true" ]]; then
+        create_cicd_access
+    else
+        echo -e "${YELLOW}>>> Skipping CI/CD access setup${NC}"
+    fi
     setup_gateway_tls
     print_summary
 }

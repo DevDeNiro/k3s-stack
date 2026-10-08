@@ -14,7 +14,7 @@ Deploy a production-ready K3s cluster on a VPS (4-6GB RAM) with essential servic
 | **Loki (SingleBin.)** | Centralized log aggregation (7d retention)       | ~256MB |
 | **Promtail**          | DaemonSet: ships pod logs to Loki                | ~128MB |
 | **Grafana**           | Dashboards + Explore (Prom/Loki/AM)              | ~256MB |
-| **Ingress NGINX**     | HTTP(S) routing                                  | ~256MB |
+| **Routing / Gateway** | NGINX Gateway Fabric (Gateway API v1.2)         | ~128MB |
 
 **Total: ~3.1GB** (leaves ~1-3GB for your applications on a 4-6GB VPS)
 
@@ -56,8 +56,9 @@ The script will:
 - Install K3s (lightweight Kubernetes)
 - Install Helm
 - Create infrastructure namespaces (storage, security, monitoring)
-- Deploy PostgreSQL, Keycloak, Prometheus, Grafana, Ingress NGINX
+- Deploy PostgreSQL, Keycloak, Prometheus, Grafana, NGINX Gateway Fabric
 - Setup PostgreSQL backup CronJob
+- Setup Argo CD GitOps auto-discovery
 
 ### 2. On Your Local Machine
 
@@ -138,29 +139,30 @@ kubectl port-forward -n monitoring svc/prometheus-server 9090:80
 # Access: http://localhost:9090
 ```
 
-### Ingress (For production)
+### Gateway API (For production routing)
 
-Configure Ingress resources for external access. Example:
+Configure HTTPRoute resources attached to `infrastructure-gateway`. Example:
 
 ```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
-    name: grafana
-    namespace: monitoring
+    name: myapp-route
+    namespace: myapp-prod
 spec:
-    ingressClassName: nginx
+    parentRefs:
+        - name: infrastructure-gateway
+          namespace: nginx-gateway
+    hostnames:
+        - app.macoterie.fr
     rules:
-        -   host: grafana.yourdomain.com
-            http:
-                paths:
-                    -   path: /
-                        pathType: Prefix
-                        backend:
-                            service:
-                                name: grafana
-                                port:
-                                    number: 80
+        - matches:
+              - path:
+                    type: PathPrefix
+                    value: /
+          backendRefs:
+              - name: myapp-service
+                port: 80
 ```
 
 ## 🗄️ PostgreSQL Features
