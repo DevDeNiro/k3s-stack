@@ -30,6 +30,11 @@ securityContext:
   runAsGroup: 472
   fsGroup: 472
 
+# Disable the init container `chown -R` : it fails on subdirectories of the existing PVC
+# (pdf/png/csv owned by root). fsGroup above already grants group access to uid/gid 472.
+initChownData:
+  enabled: false
+
 # Service configuration
 service:
   type: ClusterIP
