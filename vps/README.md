@@ -8,6 +8,8 @@ scripts of this directory.
 - Guided first installation: [`docs/vps-deployment.md`](docs/vps-deployment.md)
 - Security model and migration of an existing VPS: [`docs/security-hardening.md`](docs/security-hardening.md)
 - Workstation access (SSH tunnel, kubectl, k9s): [`docs/workstation-setup.md`](docs/workstation-setup.md)
+- Upgrading a running VPS to the multi-organization discovery, Keycloak extensions,
+  gateway rate limit and off-site backups: [Applying this change to an existing VPS](#applying-this-change-to-an-existing-vps)
 
 ## Principles
 
@@ -25,9 +27,9 @@ scripts of this directory.
 |------|---------|
 | `config.env` | Site settings (copy of `config.env.example`, not versioned) |
 | `config/` | Versions, K3s flags and audit policy, SSH/APT hardening, onboarding sizing, Helm repositories |
-| `templates/` | Manifests rendered from `config.env` with `envsubst` (Gateway, certificates, Argo CD, onboarding) |
+| `templates/` | Manifests rendered from `config.env` with `envsubst` (Gateway, certificates, Keycloak, Argo CD, onboarding, backups, credential files) |
 | `values/` | Helm values of every chart |
-| `manifests/` | Static manifests (Keycloak, Redis, NetworkPolicies, Image Updater CRs) |
+| `manifests/` | Static manifests (Redis, NetworkPolicies, Image Updater CRs) |
 | `namespaces/` | Infrastructure namespaces and their Pod Security levels |
 | `sql/` | psql scripts (roles, databases, password rotation) |
 | `postgres-backup/` | Helm chart of the PostgreSQL backup CronJobs |
@@ -39,10 +41,10 @@ scripts of this directory.
 |-----------|---------|-----------|----------|
 | K3s (SQLite datastore, secrets encrypted at rest) | v1.37.2+k3s1 | - | API closed by the firewall, SSH tunnel |
 | Gateway API CRDs (shipped with K3s) | v1.6.3 | - | - |
-| NGINX Gateway Fabric (hostPorts 80/443) | 2.8.1 | `nginx-gateway` | public entry point |
+| NGINX Gateway Fabric (hostPorts 80/443, JSON access logs without query strings) | 2.8.1 | `nginx-gateway` | public entry point |
 | cert-manager (Let's Encrypt HTTP-01) | v1.21.3 | `cert-manager` | - |
 | PostgreSQL (Bitnami chart, image pinned by digest) | chart 18.12.18, PostgreSQL 18.6 | `storage` | in-cluster, TLS available |
-| Keycloak | 26.8.2 | `security` | `/realms` and `/resources` of `AUTH_HOSTNAMES`, master realm blocked |
+| Keycloak (themes and providers from extension images) | 26.8.2 | `security` | `/realms` (rate limited) and `/resources` of `AUTH_HOSTNAMES`, master realm blocked |
 | Redis | 7 | `database` | in-cluster |
 | Argo CD + Image Updater | charts 10.17.1 / 1.4.2 | `argocd` | port-forward |
 | Sealed Secrets | chart 2.22.0 | `kube-system` | - |
@@ -50,6 +52,7 @@ scripts of this directory.
 | Grafana | chart 10.5.15 | `monitoring` | port-forward |
 | Loki + Promtail | charts 7.5.0 / 6.17.1 | `monitoring` | - |
 | PostgreSQL backups (daily, weekly, monthly) | `postgres-backup/` | `storage` | - |
+| Off-site copy of the backups (optional, encrypted) | restic 0.19.1 | `storage` | S3-compatible object storage |
 
 Steady-state memory: ~3.5 GB. 4 GB of RAM is the minimum, 6 GB is comfortable.
 
@@ -71,7 +74,8 @@ sudo ./vps/install.sh
 sudo ./vps/scripts/export-secrets.sh backup-sealing-key      # then copy the .enc file off the server
 sudo ./vps/scripts/setup-gateway-api.sh --staging            # check, then again without --staging
 sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
-sudo ./vps/scripts/onboard-app.sh <app>
+sudo ./vps/scripts/onboard-app.sh <app> [--organization <org>]
+sudo ./vps/scripts/setup-secrets.sh set-offsite-backup       # with OFFSITE_BACKUP_REPOSITORY
 
 # On the workstation
 ./vps/scripts/setup-remote.sh <vps-host> --user <ssh-user>
@@ -84,13 +88,24 @@ sudo ./vps/scripts/onboard-app.sh <app>
 | Variable | Example | Used by |
 |----------|---------|---------|
 | `SCM_PROVIDER` | `github` (or `gitlab`) | Argo CD repository discovery, `onboard-app.sh` |
-| `SCM_ORGANIZATION` | `my-org` | ApplicationSets, repository URLs |
-| `REGISTRY_BASE` | `ghcr.io/my-org` | image pull Secrets, Image Updater |
+| `SCM_ORGANIZATIONS` | `my-org other-org` | one ApplicationSet generator per organization, repository credentials, `onboard-app.sh --organization` |
+| `SCM_ORGANIZATION` | `my-org` | single organization of older files, used when `SCM_ORGANIZATIONS` is empty |
+| `REGISTRY_HOST` | `ghcr.io` (default) | images `<REGISTRY_HOST>/<organization>/<repository>` (Applications, Image Updater), image pull Secrets |
+| `REGISTRY_BASE` | `ghcr.io/my-org` (empty by default) | single organization only: fixed image path, takes precedence over `REGISTRY_HOST/<organization>` |
 | `LETSENCRYPT_EMAIL` | `admin@example.com` | ClusterIssuers |
 | `GATEWAY_HOSTNAMES` | `auth.example.com app.example.com` | one HTTPS listener and certificate per hostname |
 | `AUTH_HOSTNAMES` | `auth.example.com` | Keycloak routes (each one also listed in `GATEWAY_HOSTNAMES`) |
+| `KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST` | `10r/s`, `20` (defaults) | rate limit per client address of the Keycloak OIDC endpoints (`off` disables it) |
+| `KEYCLOAK_EXTENSION_IMAGES` | `ghcr.io/my-org/my-app-keycloak-theme:1.0.0` (empty by default) | Keycloak themes and providers ([image contract](#keycloak-extension-images)) |
+| `OFFSITE_BACKUP_REPOSITORY` | `s3:https://s3.fr-par.scw.cloud/my-bucket/k3s-stack` (empty by default) | off-site restic copy of the PostgreSQL dumps |
+| `OFFSITE_BACKUP_REGION` | `fr-par` (empty by default) | region signing the object storage requests |
 
 `./vps/scripts/apply-config.sh --check` validates the file without root access.
+
+Image paths are lowercase: the organization is lowercased in `REGISTRY_HOST/<organization>`
+(GitHub keeps the case of an organization login, GHCR refuses uppercase letters), and
+repository names must be lowercase already (they name namespaces). Repository names must be
+unique across the organizations.
 
 ### `vps/config/versions.env`
 
@@ -125,8 +140,9 @@ sudo ./vps/install.sh
 Installs, in order: dependencies (`iptables` before K3s), K3s from the configuration files,
 host hardening, Helm, namespaces, credentials and Secrets, NGINX Gateway Fabric,
 cert-manager and the Let's Encrypt ClusterIssuers, PostgreSQL, the Keycloak database and
-Keycloak, Redis, Prometheus, Grafana, Loki, Promtail, Sealed Secrets, Argo CD with the
-Image Updater and the GitOps configuration, the backup CronJobs and the NetworkPolicies.
+Keycloak (`apply-keycloak.sh`), Redis, Prometheus, Grafana, Loki, Promtail, Sealed Secrets,
+Argo CD with the Image Updater and the GitOps configuration (`apply-config.sh`), the backup
+CronJobs (`apply-backups.sh`) and the NetworkPolicies.
 It takes no argument; its environment variables:
 
 | Variable | Default | Effect |
@@ -154,8 +170,11 @@ sudo ./vps/uninstall.sh [--all] [--k3s] [--helm] [--keep-secrets] [--force]
 | `--keep-secrets` | keeps `/root/.k3s-secrets` (removed by default) |
 | `--force` | no confirmation prompt |
 
-Always kept: `/var/backups/k3s-stack`, the UFW rules, the SSH and APT hardening. Before
-`--k3s`, the script warns when no Sealed Secrets key backup exists.
+Always kept: `/var/backups/k3s-stack`, the UFW rules, the SSH and APT hardening. Both
+modes delete the PostgreSQL data and its local dumps (volumes of the namespace `storage`):
+the script warns when no off-site copy is configured, or when its credentials
+(`/root/.k3s-secrets/offsite-backup.env`) are about to be removed. Before `--k3s`, it
+warns when no Sealed Secrets key backup exists.
 
 ### `scripts/apply-config.sh`
 
@@ -164,13 +183,73 @@ Always kept: `/var/backups/k3s-stack`, the UFW rules, the SSH and APT hardening.
 ```
 
 Validates `config.env`, then renders and applies the Argo CD ApplicationSets
-(`templates/argocd/applicationsets.yaml.tpl`) and the Image Updater CRs. Run again after
-changing `SCM_ORGANIZATION` or `REGISTRY_BASE`.
+(`templates/argocd/applicationsets.yaml.tpl`, one generator per organization of
+`SCM_ORGANIZATIONS`: `templates/argocd/generator-{alpha,prod}.yaml.tpl`) and the Image
+Updater CRs. Run again after changing `SCM_ORGANIZATIONS`, `REGISTRY_HOST` or
+`REGISTRY_BASE`.
 
 | Option | Effect |
 |--------|--------|
 | `--check` | validates `config.env` only (no root needed) |
 | `--dry-run` | prints the rendered manifests |
+
+Applications per repository holding `helm/<repository>/`: `<repository>-prod` (branch
+`main`, image `<image path>/<repository>`, tags `main-<sha>`, manual sync) for every
+repository whose default branch holds `helm/`, and `<repository>-alpha` (branch `develop`,
+tags `develop-<sha>`, automated sync) only when the repository has a `develop` branch
+holding `helm/`.
+
+### `scripts/apply-keycloak.sh`
+
+```text
+sudo ./vps/scripts/apply-keycloak.sh [--dry-run] [--no-restart]
+```
+
+Renders Keycloak (`templates/keycloak/`) with the extension images of
+`KEYCLOAK_EXTENSION_IMAGES`, applies it, restarts Keycloak and waits until it is ready
+(logins unavailable for 1 to 2 minutes). Run again after changing the images. Called by
+`install.sh` with `--no-restart`.
+
+| Option | Effect |
+|--------|--------|
+| `--dry-run` | prints the rendered manifest (no root needed) |
+| `--no-restart` | applies only: Keycloak restarts when the manifest changed |
+
+#### Keycloak extension images
+
+Each image of `KEYCLOAK_EXTENSION_IMAGES` runs as an initContainer at every Keycloak start
+(Pod Security `restricted`: UID 1000, read-only root filesystem, no capability). Contract:
+
+- `sh` and `cp` available (a `busybox` base is enough), runnable as a non-root user;
+- themes under `/themes/<theme-name>/` (login, email, account...), copied into
+  `/opt/keycloak/themes`;
+- provider JARs under `/providers/` (optional), copied into `/opt/keycloak/providers`;
+- a tag or a digest in the reference, never `latest`: a tag is pulled once per node
+  (`IfNotPresent`), so a new version needs a new tag, then `apply-keycloak.sh`.
+
+Images are copied in their order (a later image overwrites the files of an earlier one).
+Keycloak runs `start` without `--optimized`: it rebuilds itself at startup when the build
+options or the providers changed, so providers need no custom Keycloak image. A provider JAR
+runs with the full rights of Keycloak (database, credentials): only use trusted images.
+Private images are pulled with the Secret `security/ghcr-secret`, created by
+`export-secrets.sh set-scm-credentials github`.
+
+### `scripts/apply-backups.sh`
+
+```text
+[sudo] ./vps/scripts/apply-backups.sh [--dry-run]
+```
+
+Installs or upgrades the backup chart (`postgres-backup/`, namespace `storage`): the daily,
+weekly and monthly dumps, plus the off-site restic copy and its weekly check when
+`OFFSITE_BACKUP_REPOSITORY` is set (restic version: `RESTIC_VERSION` of
+`config/versions.env`). Run again after changing the off-site settings or the chart;
+emptying `OFFSITE_BACKUP_REPOSITORY` removes the off-site CronJobs. Called by `install.sh`.
+Details: [`docs/postgres-backup.md`](docs/postgres-backup.md).
+
+| Option | Effect |
+|--------|--------|
+| `--dry-run` | prints the rendered manifests (`helm template`, no root needed) |
 
 ### `scripts/harden-host.sh`
 
@@ -201,12 +280,15 @@ Keep a second SSH session open until a new login works after `--harden-ssh`.
 sudo ./vps/scripts/setup-gateway-api.sh [--staging] [--no-tls] [--dry-run]
 ```
 
-From `GATEWAY_HOSTNAMES` and `AUTH_HOSTNAMES`: Gateway `infrastructure-gateway`
-(namespace `nginx-gateway`, one HTTP listener and one `https-<hostname>` listener per
-hostname), one Let's Encrypt Certificate per hostname (certificates of removed hostnames
-are pruned), HTTP to HTTPS redirection, Keycloak routes (`/realms`, `/resources`; master
-realm answered by the gateway; admin console not routed), and the CoreDNS hairpin (pods
-resolve the public hostnames to the gateway). Run again after changing the hostnames.
+From `GATEWAY_HOSTNAMES`, `AUTH_HOSTNAMES` and `KEYCLOAK_RATE_LIMIT_*`: Gateway
+`infrastructure-gateway` (namespace `nginx-gateway`, one HTTP listener and one
+`https-<hostname>` listener per hostname), one Let's Encrypt Certificate per hostname
+(certificates of removed hostnames are pruned), HTTP to HTTPS redirection, Keycloak routes
+(HTTPRoute `keycloak`: `/realms`, master realm answered by the gateway; HTTPRoute
+`keycloak-resources`: `/resources`; admin console not routed), the RateLimitPolicy
+`keycloak` of the OIDC endpoints (per client address, `429` above the burst, login assets
+not limited), and the CoreDNS hairpin (pods resolve the public hostnames to the gateway).
+Run again after changing the hostnames or the rate limit.
 
 | Option | Effect |
 |--------|--------|
@@ -220,7 +302,7 @@ Applications attach their HTTPRoutes to the Gateway:
 ### `scripts/setup-secrets.sh`
 
 ```text
-sudo ./vps/scripts/setup-secrets.sh <setup | rotate | set-discord-webhook>
+sudo ./vps/scripts/setup-secrets.sh <setup | rotate | set-discord-webhook | set-offsite-backup>
 ```
 
 | Command | Effect |
@@ -228,6 +310,10 @@ sudo ./vps/scripts/setup-secrets.sh <setup | rotate | set-discord-webhook>
 | `setup` | generates the infrastructure passwords once (`/root/.k3s-secrets/credentials.env`) and creates the Kubernetes Secrets; existing credentials are reused (run by `install.sh`) |
 | `rotate` | new PostgreSQL superuser, Keycloak database and Argo CD admin passwords, then restarts PostgreSQL and Keycloak |
 | `set-discord-webhook` | stores the Discord webhook URL of Alertmanager (hidden input) |
+| `set-offsite-backup` | stores the off-site backup credentials (hidden input): object storage keys and restic password, in `/root/.k3s-secrets/offsite-backup.env` and the Secret `storage/postgres-backup-offsite`; Enter keeps a saved value, an empty password with nothing saved generates one |
+
+Keep the restic password in a password manager: without it, the off-site backups can never
+be decrypted (`export-secrets.sh show offsite-backup` displays it).
 
 The Keycloak and Grafana admin passwords only apply at their first start: change them in
 their consoles afterwards.
@@ -240,34 +326,44 @@ sudo ./vps/scripts/export-secrets.sh <command> [arguments]
 
 | Command | Effect |
 |---------|--------|
-| `show [service]` | generated credentials; `service`: `postgres`, `keycloak`, `grafana`, `argocd` or an onboarded application |
+| `show [service]` | generated credentials; `service`: `postgres`, `keycloak`, `grafana`, `argocd`, `offsite-backup` or an onboarded application |
 | `export-cert <dest>` | Sealed Secrets public certificate, for `kubeseal --cert` on a workstation |
 | `backup-sealing-key [dest]` | encrypted backup (AES-256, PBKDF2) of the Sealed Secrets private keys, default `/var/backups/k3s-stack/sealed-secrets/` |
 | `restore-sealing-key <file>` | restores the keys of a backup and restarts the controller |
 | `export-kubeconfig <app> <env> <dest>` | CI/CD kubeconfig created by `onboard-app.sh --with-cicd` |
 | `fetch-from-k8s <secret> <namespace>` | decoded content of a Kubernetes Secret |
-| `set-scm-credentials <github\|gitlab>` | repository access for Argo CD (hidden token input): `<provider>-repo-creds`, `scm-token` (repository discovery) and `ghcr-registry-secret` (Image Updater) |
+| `set-scm-credentials <github\|gitlab>` | repository and registry access for every organization of `SCM_ORGANIZATIONS` (hidden token input): credential template `<provider>-repo-creds` (URL prefix `https://<provider>.com/<org>`, or `https://<provider>.com/` for several organizations), `scm-token` (every discovery generator), and for GitHub `ghcr-registry-secret` (Image Updater) and `security/ghcr-secret` (Keycloak extension images) |
 
 `SEALING_KEY_PASSPHRASE` provides the backup passphrase (prompted when unset). Without the
 Sealed Secrets key, the SealedSecrets committed in Git can never be decrypted again: copy
 every backup off the server.
 
+One token serves every organization. On GitHub it must be a **classic** personal access
+token with the scopes `repo` and `read:packages`: a fine-grained token is limited to a
+single owner, and GHCR only accepts classic tokens. Its owner needs read access to the
+repositories and packages of every organization (an organization enforcing SAML SSO must
+authorize the token). Run the command again to rotate the token, then onboard the
+applications again to refresh their `ghcr-secret`.
+
 ### `scripts/onboard-app.sh`
 
 ```text
-sudo ./vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--skip-database] [--with-cicd]
+sudo ./vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--organization ORG]
+                                  [--skip-database] [--with-cicd]
 ```
 
 For each environment (`<app>-alpha`, `<app>-prod`): the namespace with its quota, default
 limits and Pod Security level (`config/onboarding/<env>.env`: alpha `baseline`, prod
 `restricted`), the PostgreSQL role and database `<app>-<env>`, the Secret `<app>-db`
 (`host`, `port`, `database`, `username`, `password`, `url` and `r2dbc-url` with TLS
-required), the image pull Secret `ghcr-secret` and the Argo CD repository Secret (after
+required), the image pull Secret `ghcr-secret` (registry of `REGISTRY_HOST`, or of
+`REGISTRY_BASE`) and the Argo CD repository Secret of `<organization>/<app>` (after
 `set-scm-credentials`).
 
 | Option | Effect |
 |--------|--------|
 | `--environment ENV` | `all` (default), `alpha` or `prod` |
+| `--organization ORG` | organization of the repository, one of `SCM_ORGANIZATIONS` (default: the first one) |
 | `--skip-database` | no role, database or `<app>-db` Secret |
 | `--with-cicd` | ServiceAccount `deployer` limited to the namespace and its kubeconfig in `/root/.k3s-secrets/kubeconfigs/` (Argo CD already pulls the deployments) |
 
@@ -334,10 +430,11 @@ Port-forwards enter the pod network namespace: the NetworkPolicies do not apply 
 |------|---------|
 | `/etc/rancher/k3s/config.yaml`, `/etc/rancher/k3s/k3s.yaml` | K3s flags, admin kubeconfig (0600) |
 | `/var/log/kubernetes/audit/audit.log` | API audit log (Secrets at metadata level, 7 days) |
-| `/root/.k3s-secrets/` | `credentials.env`, `<app>.env`, `kubeconfigs/` (removed by `uninstall.sh`) |
+| `/root/.k3s-secrets/` | `credentials.env`, `<app>.env`, `offsite-backup.env`, `kubeconfigs/` (removed by `uninstall.sh`) |
 | `/var/backups/k3s-stack/k3s/` | K3s datastore backups (`k3s-maintenance.sh`) |
-| `/var/backups/k3s-stack/sealed-secrets/` | encrypted Sealed Secrets key backups |
+| `/var/backups/k3s-stack/sealed-secrets/` | encrypted Sealed Secrets key backups (copy them off the server by hand) |
 | PVC `storage/postgres-backup-pvc` | PostgreSQL dumps ([`docs/postgres-backup.md`](docs/postgres-backup.md)) |
+| `OFFSITE_BACKUP_REPOSITORY` (object storage) | encrypted restic copy of the PostgreSQL dumps |
 
 ## Checks
 
@@ -356,3 +453,95 @@ make helm-test  # Helm lint and template of the repository charts
 | Pods without DNS or Internet access | `ufw status` must list the `K3s pods (forwarded)` route rules (`harden-host.sh --apply`) |
 | Application cannot reach PostgreSQL | namespace label `app.kubernetes.io/managed-by=k3s-stack` (set by `onboard-app.sh`); a new pod is admitted by the NetworkPolicies ~2 s after it starts: connect with retries |
 | K3s does not start | `systemctl status k3s`, `journalctl -u k3s -n 100` |
+| No Application for a repository | `kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controller --tail=50`: token without access to the organization (`set-scm-credentials`), no `helm/` directory, no `develop` branch (alpha), repository name used in two organizations |
+| Keycloak pod `Init:ImagePullBackOff` | reference of `KEYCLOAK_EXTENSION_IMAGES`; private image: `kubectl get secret ghcr-secret -n security` (`set-scm-credentials github`), then `apply-keycloak.sh` |
+| Keycloak answers `429` | `KEYCLOAK_RATE_LIMIT_RATE` and `KEYCLOAK_RATE_LIMIT_BURST` too low for the clients behind one address: raise them (or `off`), then `setup-gateway-api.sh`; `kubectl describe ratelimitpolicy keycloak -n security` |
+| `KubeJobFailed` on `postgres-backup-offsite*` | `kubectl logs -n storage -l app.kubernetes.io/component=offsite --tail=50` (exit code 12: wrong `RESTIC_PASSWORD`; unreachable repository: keys, region, bucket), [`docs/postgres-backup.md`](docs/postgres-backup.md) |
+
+## Applying this change to an existing VPS
+
+An installation made before the multi-organization discovery, the Keycloak extensions, the
+gateway rate limit, the access log hygiene and the off-site backups gets them in place,
+without reinstallation. On the server, as root, from the updated clone:
+
+```bash
+cd <clone>/k3s-stack && git pull
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+```
+
+1. **`vps/config.env`**: add the new variables (`vps/config.env.example` documents them),
+   then validate the file.
+
+   ```bash
+   # SCM_ORGANIZATIONS="my-org other-org"   the current organization first (default of onboard-app.sh)
+   # REGISTRY_HOST="ghcr.io"                 remove REGISTRY_BASE when several organizations are listed
+   # KEYCLOAK_EXTENSION_IMAGES="ghcr.io/my-org/my-app-keycloak-theme:1.0.0"
+   # KEYCLOAK_RATE_LIMIT_RATE="10r/s"; KEYCLOAK_RATE_LIMIT_BURST="20"
+   # OFFSITE_BACKUP_REPOSITORY="s3:https://s3.fr-par.scw.cloud/my-bucket/k3s-stack"; OFFSITE_BACKUP_REGION="fr-par"
+   nano vps/config.env
+   ./vps/scripts/apply-config.sh --check
+   ```
+
+2. **Repository and registry access** for every organization, before the new generators
+   and the Keycloak extension images need it (classic token, scopes `repo` and
+   `read:packages`):
+
+   ```bash
+   ./vps/scripts/export-secrets.sh set-scm-credentials github
+   ```
+
+3. **Auto-discovery**: one generator per organization. Alpha Applications of repositories
+   without a `develop` branch are deleted (with their resources).
+
+   ```bash
+   ./vps/scripts/apply-config.sh
+   kubectl get applicationsets,applications -n argocd
+   ```
+
+4. **Logs**: redaction stages of Promtail, then JSON access logs without query strings
+   (NGINX reloads, no downtime). Pinned chart versions:
+
+   ```bash
+   source vps/config/versions.env
+   helm upgrade promtail grafana/promtail --version "$PROMTAIL_CHART_VERSION" -n monitoring -f vps/values/promtail.yaml
+   helm upgrade nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version "$NGINX_GATEWAY_FABRIC_VERSION" \
+       -n nginx-gateway -f vps/values/nginx-gateway-fabric.yaml --wait
+   ```
+
+5. **Keycloak**: SMTP egress for the realm emails, then the template with the extension
+   images (restart: logins unavailable for 1 to 2 minutes).
+
+   ```bash
+   kubectl apply -f vps/manifests/network-policies.yaml
+   ./vps/scripts/apply-keycloak.sh
+   ```
+
+6. **Gateway**: Keycloak routes split (`keycloak`, `keycloak-resources`) and rate limit of
+   the OIDC endpoints.
+
+   ```bash
+   ./vps/scripts/setup-gateway-api.sh
+   kubectl get httproutes,ratelimitpolicies -n security
+   ```
+
+7. **Off-site backups**: credentials, then the backup chart, then a first copy (it creates
+   the repository).
+
+   ```bash
+   ./vps/scripts/setup-secrets.sh set-offsite-backup
+   ./vps/scripts/apply-backups.sh
+   kubectl create job --from=cronjob/postgres-backup-offsite offsite-first-$(date +%s) -n storage
+   kubectl logs -n storage -l app.kubernetes.io/component=offsite -f
+   ```
+
+8. **Applications**: onboard the repositories of the other organizations, and onboard the
+   existing applications again to refresh their image pull Secret with the new token.
+
+   ```bash
+   ./vps/scripts/onboard-app.sh <app> --environment prod --organization <org>
+   ```
+
+Rollback: `KEYCLOAK_RATE_LIMIT_RATE="off"` then `setup-gateway-api.sh` removes the rate
+limit; an empty `KEYCLOAK_EXTENSION_IMAGES` then `apply-keycloak.sh` restores the plain
+Keycloak; an empty `OFFSITE_BACKUP_REPOSITORY` then `apply-backups.sh` removes the off-site
+CronJobs (the repository and its snapshots stay in the bucket).

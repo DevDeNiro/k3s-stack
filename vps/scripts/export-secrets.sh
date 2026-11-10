@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # Credentials and secret operations of the stack (root only): display of the
 # generated credentials, Sealed Secrets certificate and key backup, CI/CD
-# kubeconfigs, repository credentials for Argo CD.
+# kubeconfigs, repository and registry credentials for Argo CD and Keycloak.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,14 +24,16 @@ usage() {
         "" \
         "Commands:" \
         "  show [service]                        generated credentials; service: postgres, keycloak," \
-        "                                        grafana, argocd, or an onboarded application name" \
+        "                                        grafana, argocd, offsite-backup, or an onboarded" \
+        "                                        application name" \
         "  export-cert <dest>                    Sealed Secrets public certificate (for kubeseal)" \
         "  backup-sealing-key [dest]             encrypted backup of the Sealed Secrets private keys" \
         "                                        (default: ${SEALING_BACKUP_DIR}/sealed-secrets-keys-<date>.enc)" \
         "  restore-sealing-key <file>            restore keys from a backup, restart the controller" \
         "  export-kubeconfig <app> <env> <dest>  CI/CD kubeconfig of onboard-app.sh --with-cicd" \
         "  fetch-from-k8s <secret> <namespace>   decoded content of a Kubernetes Secret" \
-        "  set-scm-credentials <github|gitlab>   repository access for Argo CD (hidden input)" \
+        "  set-scm-credentials <github|gitlab>   repository and registry access for every organization" \
+        "                                        of SCM_ORGANIZATIONS (hidden token input)" \
         "" \
         "Environment: SEALING_KEY_PASSPHRASE  passphrase of the key backups (prompted when unset)"
 }
@@ -155,10 +157,23 @@ cmd_restore_sealing_key() {
 }
 
 # -----------------------------------------------------------------------------
-# Argo CD repository access
+# Repository and registry access (Argo CD, Image Updater, Keycloak extensions)
 # -----------------------------------------------------------------------------
+# default_credentials_url <provider> <organization>...: URL prefix of the Argo CD
+# credential template, matched against the repository URLs: the organization
+# itself, or the whole provider when several organizations share the token
+default_credentials_url() {
+    local provider="$1"
+    shift
+    case $# in
+        0) echo "" ;;
+        1) echo "https://${provider}.com/$1" ;;
+        *) echo "https://${provider}.com/" ;;
+    esac
+}
+
 cmd_set_scm_credentials() {
-    local provider="${1:-}" default_url="" url token username registry
+    local provider="${1:-}" default_url="" url token username org organizations=""
     case "$provider" in
         github) username="git" ;;
         gitlab) username="oauth2" ;;
@@ -166,30 +181,52 @@ cmd_set_scm_credentials() {
     esac
     if [[ -f "$VPS_CONFIG_FILE" ]]; then
         load_config
-        default_url="https://${provider}.com/${SCM_ORGANIZATION:-}"
+        organizations=$(scm_organizations)
+        # shellcheck disable=SC2086  # word splitting of the organization list
+        default_url=$(default_credentials_url "$provider" $organizations)
     fi
 
     banner "Repository access for Argo CD ($provider)"
-    echo "Token scopes: GitHub 'repo' + 'read:packages' (or fine-grained 'Contents: read'), GitLab 'read_repository'."
-    read -r -p "Organization or group URL [$default_url]: " url
+    echo "One token for every organization${organizations:+ ($organizations)}:"
+    echo "  GitHub: classic personal access token with the scopes 'repo' and 'read:packages'. A"
+    echo "  fine-grained token is limited to one owner and GHCR only accepts classic tokens. For an"
+    echo "  organization enforcing SAML SSO, authorize the token for it."
+    echo "  GitLab: 'read_repository' and 'read_registry'."
+    read -r -p "Repository URL prefix covering every organization [$default_url]: " url
     url="${url:-$default_url}"
     [[ -n "$url" ]] || die "the URL cannot be empty"
+    for org in $organizations; do
+        case "$(lowercase "https://${provider}.com/${org}/")" in
+            "$(lowercase "$url")"*) ;;
+            *) warn "$url does not cover $org: its repositories rely on the repository Secrets of onboard-app.sh" ;;
+        esac
+    done
     read -r -s -p "Token: " token
     echo ""
     [[ -n "$token" ]] || die "the token cannot be empty"
 
+    # Credential template: Argo CD matches its URL as a prefix of the repository URLs
     apply_secret argocd "${provider}-repo-creds" type=git "url=$url" "username=$username" "password=$token"
     kubectl label secret "${provider}-repo-creds" -n argocd argocd.argoproj.io/secret-type=repo-creds --overwrite >/dev/null
-    # ApplicationSet SCM generator token (templates/argocd/applicationsets.yaml.tpl)
+    # Token of every ApplicationSet SCM generator (templates/argocd/generator-*.yaml.tpl)
     apply_secret argocd scm-token "token=$token"
-    ok "${provider}-repo-creds and scm-token created in argocd"
+    ok "${provider}-repo-creds ($url) and scm-token created in argocd"
 
     if [[ "$provider" == "github" ]]; then
-        # Image Updater registry credentials (values/argocd-image-updater.yaml)
-        registry="ghcr.io"
-        apply_registry_secret argocd ghcr-registry-secret "$registry" "$username" "$token"
+        # Image Updater registry credentials (values/argocd-image-updater.yaml), every
+        # ghcr.io/<organization>/... image
+        apply_registry_secret argocd ghcr-registry-secret ghcr.io "$username" "$token"
         ok "ghcr-registry-secret created in argocd"
+        # Private Keycloak extension images (templates/keycloak/extensions-pod.yaml.tpl)
+        if kubectl get namespace security >/dev/null 2>&1; then
+            apply_registry_secret security "$KEYCLOAK_PULL_SECRET" ghcr.io "$username" "$token"
+            ok "$KEYCLOAK_PULL_SECRET created in security (Keycloak extension images)"
+            if [[ -n "${KEYCLOAK_EXTENSION_IMAGES:-}" ]]; then
+                echo "  Keycloak pulls its extension images at its next start: sudo ./vps/scripts/apply-keycloak.sh"
+            fi
+        fi
     fi
+    echo "Application namespaces get their image pull Secret from onboard-app.sh (run it again after a token change)."
 }
 
 main() {

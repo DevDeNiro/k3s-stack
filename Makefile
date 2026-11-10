@@ -5,6 +5,13 @@
 SHELL_SCRIPTS := $(shell find vps local -type f -name '*.sh' | sort)
 SHELLCHECK_IMAGE := koalaman/shellcheck:stable
 
+# postgres-backup with the off-site copy enabled (example repository, pinned restic)
+RESTIC_VERSION := $(shell . vps/config/versions.env && echo "$$RESTIC_VERSION")
+OFFSITE_TEST_VALUES := --set offsite.enabled=true \
+	--set-string offsite.repository=s3:https://s3.example.com/my-bucket/k3s-stack \
+	--set-string offsite.region=example-region \
+	--set-string offsite.image.tag=$(RESTIC_VERSION)
+
 # Default target
 help:
 	@echo "Available targets:"
@@ -48,9 +55,11 @@ helm-lint:
 	@echo "Running Helm lint..."
 	@helm lint charts/common-library
 	@helm lint vps/postgres-backup
+	@helm lint vps/postgres-backup $(OFFSITE_TEST_VALUES)
 
 # common-library is a library chart: Helm cannot render it on its own
 helm-template:
 	@echo "Validating Helm templates..."
 	@helm template postgres-backup vps/postgres-backup --namespace storage > /dev/null
+	@helm template postgres-backup vps/postgres-backup --namespace storage $(OFFSITE_TEST_VALUES) > /dev/null
 	@echo "Template validation passed."

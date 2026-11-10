@@ -193,6 +193,21 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Allow the realm emails (invitations, password resets, email verification)
+    # through an SMTP relay on the Internet: submission with STARTTLS (587) or
+    # implicit TLS (465). Port 25 stays closed.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 587
+        - protocol: TCP
+          port: 465
 
 ---
 # =============================================================================

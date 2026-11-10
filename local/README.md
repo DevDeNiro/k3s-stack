@@ -2,8 +2,8 @@
 
 A local Kubernetes cluster built with [k3d](https://k3d.io/) that mirrors the VPS
 platform: same K3s release and flags, same Gateway API controller, same PostgreSQL
-configuration (TLS, SCRAM), same Keycloak manifest and routes, same GitOps and secret
-controllers. Versions come from [`../vps/config/versions.env`](../vps/config/versions.env),
+configuration (TLS, SCRAM), same Keycloak template, routes and rate limit, same GitOps and
+secret controllers. Versions come from [`../vps/config/versions.env`](../vps/config/versions.env),
 shared with the VPS.
 
 ## Architecture
@@ -91,6 +91,22 @@ The script is idempotent: run it again to add a component. It warns when an exis
 cluster runs another K3s release than `K3S_VERSION` (`--recreate` aligns it).
 Version overrides work as on the VPS: `K3S_VERSION=... ./local/install.sh --recreate`.
 
+Keycloak reads the `KEYCLOAK_*` settings of `vps/config.env` from the environment:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `KEYCLOAK_EXTENSION_IMAGES` | empty | theme and provider images copied into Keycloak (contract: [`../vps/README.md`](../vps/README.md#keycloak-extension-images)) |
+| `KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST` | `10r/s`, `20` | rate limit of `/realms` per client address (`off` disables it) |
+
+A locally built theme image is loaded into the cluster first, under a tag that is not
+`latest` (a tag is pulled once per node):
+
+```bash
+k3d image import my-app-keycloak-theme:dev -c dev-cluster
+KEYCLOAK_EXTENSION_IMAGES="my-app-keycloak-theme:dev" ./local/install.sh --with-keycloak
+kubectl rollout restart statefulset/keycloak -n security    # same tag, new content
+```
+
 ### `deploy-app.sh`
 
 ```text
@@ -136,15 +152,15 @@ application HTTPRoutes: add them to `/etc/hosts` (`127.0.0.1 <hostname>`), excep
 | Gateway API CRDs | v1.6.3 (shipped with K3s) | same | |
 | NGINX Gateway Fabric | 2.8.1 | same | `local/manifests/infrastructure-gateway.yaml`: HTTP listener only |
 | PostgreSQL | chart 18.12.18, image digest of the VPS | same | `vps/values/postgresql.yaml` then `local/values/postgresql.yaml` |
-| Keycloak | 26.8.2, same manifest and routes | same | HTTP on `auth.localhost` instead of HTTPS |
+| Keycloak | 26.8.2, same template, routes and rate limit | same | HTTP on `auth.localhost` instead of HTTPS; extension images from `KEYCLOAK_EXTENSION_IMAGES` of the environment |
 | Argo CD | chart 10.17.1 | same | |
 | Sealed Secrets | chart 2.22.0 | same | |
 | Prometheus / Grafana | charts 29.47.0 / 10.5.15 | same (plus Loki, Promtail, Alertmanager rules) | `local/values/` |
 | Redis | 7 | same | |
 
 Local exceptions: no firewall, no TLS on the Gateway (no cert-manager), no audit log, no
-NetworkPolicies, no Pod Security labels, no backups. Ports are published on 127.0.0.1
-only. The `prometheus-config-reloader` image is overridden with a multi-arch release for
+NetworkPolicies, no Pod Security labels, no backups (local or off-site), default access log
+format of the gateway. Ports are published on 127.0.0.1 only. The `prometheus-config-reloader` image is overridden with a multi-arch release for
 Apple Silicon (`local/values/prometheus.yaml`).
 
 ## Secrets and passwords

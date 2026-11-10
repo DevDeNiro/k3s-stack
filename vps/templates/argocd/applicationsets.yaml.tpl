@@ -1,7 +1,14 @@
 # =============================================================================
-# Argo CD ApplicationSets - Auto-Discovery of the GitHub organization repositories
-# Rendered and applied by vps/scripts/apply-config.sh
-# (variables: SCM_ORGANIZATION, REGISTRY_BASE from config.env).
+# Argo CD ApplicationSets - auto-discovery of the repositories of every GitHub
+# organization of SCM_ORGANIZATIONS (config.env)
+# Rendered and applied by vps/scripts/apply-config.sh: one scmProvider generator
+# per organization (templates/argocd/generator-{alpha,prod}.yaml.tpl).
+#
+# Each generator carries the image path of its organization in values.imageBase
+# (REGISTRY_HOST/<organization, lowercased>, or REGISTRY_BASE for a single
+# organization): Applications use the image {{values.imageBase}}/{{repository}}.
+# Repository names must be unique across the organizations: they name the
+# Applications and the namespaces (<repository>-alpha, <repository>-prod).
 #
 # The scm-token Secret is managed by export-secrets.sh set-scm-credentials,
 # never here (it would be overwritten with empty values).
@@ -11,7 +18,7 @@
 # =============================================================================
 
 ---
-# ApplicationSet - Alpha environments (develop branch)
+# ApplicationSet - Alpha environments (develop branch, when the repository has one)
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -19,20 +26,7 @@ metadata:
     namespace: argocd
 spec:
     generators:
-        -   scmProvider:
-                github:
-                    organization: ${SCM_ORGANIZATION}
-                    tokenRef:
-                        secretName: scm-token
-                        key: token
-                    allBranches: false
-                cloneProtocol: https
-                # IMPORTANT: SCM provider does NOT support glob patterns in pathsExist
-                # Use 'helm' directory check, the helm chart path is derived from repo name
-                filters:
-                    -   pathsExist:
-                            - helm
-
+${ALPHA_GENERATORS}
     # Allow Image Updater to modify helm parameters without being reverted
     ignoreApplicationDifferences:
         -   jsonPointers:
@@ -47,7 +41,7 @@ spec:
                 app.kubernetes.io/environment: alpha
                 app.kubernetes.io/managed-by: argocd-autodiscover
             annotations:
-                argocd-image-updater.argoproj.io/image-list: "app=${REGISTRY_BASE}/{{repository}}"
+                argocd-image-updater.argoproj.io/image-list: "app={{values.imageBase}}/{{repository}}"
                 argocd-image-updater.argoproj.io/app.update-strategy: newest-build
                 # Only deploy immutable builds created from the develop branch (CI tag develop-<full sha>)
                 argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^develop-[a-f0-9]{40}$"
@@ -66,7 +60,7 @@ spec:
                         - values-alpha.yaml
                     parameters:
                         -   name: image.repository
-                            value: "${REGISTRY_BASE}/{{repository}}"
+                            value: "{{values.imageBase}}/{{repository}}"
                         -   name: image.tag
                             value: develop
             destination:
@@ -87,21 +81,13 @@ metadata:
     name: autodiscover-prod
     namespace: argocd
 spec:
+    # A repository that leaves the discovery (token without access, repository
+    # renamed or archived) deletes its prod Application: keep the resources it
+    # deployed (workloads, Secrets) instead of pruning them with it
+    syncPolicy:
+        preserveResourcesOnDeletion: true
     generators:
-        -   scmProvider:
-                github:
-                    organization: ${SCM_ORGANIZATION}
-                    tokenRef:
-                        secretName: scm-token
-                        key: token
-                    allBranches: false
-                cloneProtocol: https
-                # IMPORTANT: SCM provider does NOT support glob patterns in pathsExist
-                # Use 'helm' directory check, the helm chart path is derived from repo name
-                filters:
-                    -   pathsExist:
-                            - helm
-
+${PROD_GENERATORS}
     # Allow Image Updater to modify helm parameters without being reverted
     ignoreApplicationDifferences:
         -   jsonPointers:
@@ -116,7 +102,7 @@ spec:
                 app.kubernetes.io/environment: prod
                 app.kubernetes.io/managed-by: argocd-autodiscover
             annotations:
-                argocd-image-updater.argoproj.io/image-list: "app=${REGISTRY_BASE}/{{repository}}"
+                argocd-image-updater.argoproj.io/image-list: "app={{values.imageBase}}/{{repository}}"
                 argocd-image-updater.argoproj.io/app.update-strategy: newest-build
                 # Only deploy immutable builds created from the main branch
                 argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^main-[a-f0-9]{40}$"
@@ -135,7 +121,7 @@ spec:
                         - values-prod.yaml
                     parameters:
                         -   name: image.repository
-                            value: "${REGISTRY_BASE}/{{repository}}"
+                            value: "{{values.imageBase}}/{{repository}}"
                         -   name: image.tag
                             value: main
             destination:

@@ -130,6 +130,29 @@ sum by (pod) (rate({namespace="my-app-alpha"} |= "ERROR" [1m]))
 
 Use Grafana → Explore → Loki datasource for an interactive UI.
 
+### Gateway access logs and redaction
+
+The NGINX data plane writes one JSON line per request (`vps/values/nginx-gateway-fabric.yaml`, NginxProxy
+`logging.accessLog`): `time`, `remote_addr`, `host`, `method`, `path` (without the query string), `protocol`,
+`status`, `body_bytes_sent`, `request_time`, `upstream_status`, `upstream_response_time`, `user_agent`. The
+query string and the Referer header are never logged: they carry OAuth codes, states and tokens.
+
+Before Loki, two Promtail `replace` stages (`vps/values/promtail.yaml`) mask, in the lines of every pod, the token
+of `/stop/<token>` paths and the values of the `code`, `state`, `session_state` and `id_token_hint` query
+parameters (`<redacted>`). The raw lines stay in the node files (`/var/log/pods/`) until the kubelet rotates them:
+see [`security-hardening.md`](security-hardening.md).
+
+```logql
+# Requests answered 429 (rate limits), per host
+sum by (host) (count_over_time({namespace="nginx-gateway"} | json | status="429" [5m]))
+
+# 401 and 403 answers per path
+sum by (path) (count_over_time({namespace="nginx-gateway"} | json | status=~"401|403" [15m]))
+
+# Slow requests (seconds)
+{namespace="nginx-gateway"} | json | request_time > 1
+```
+
 ## Notes for VPS upgrades
 
 Chart versions are pinned in `vps/config/versions.env`; `install.sh` applies them. To

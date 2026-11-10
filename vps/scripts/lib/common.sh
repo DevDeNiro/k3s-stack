@@ -38,6 +38,19 @@ PG_SERVICE_HOST="postgresql.storage.svc.cluster.local"
 PG_ADMIN_SECRET="postgresql-secret"
 PG_ADMIN_SECRET_KEY="postgres-password"
 
+# Defaults of the optional config.env settings
+DEFAULT_REGISTRY_HOST="ghcr.io"
+DEFAULT_KEYCLOAK_RATE_LIMIT_RATE="10r/s"
+DEFAULT_KEYCLOAK_RATE_LIMIT_BURST="20"
+
+# Image pull Secret of the Keycloak extension images (namespace security,
+# created by export-secrets.sh set-scm-credentials github)
+KEYCLOAK_PULL_SECRET="ghcr-secret"
+
+# Credentials of the off-site backup copy (namespace storage, created by
+# setup-secrets.sh set-offsite-backup, read by the postgres-backup chart)
+OFFSITE_BACKUP_SECRET="postgres-backup-offsite"
+
 # -----------------------------------------------------------------------------
 # Output
 # -----------------------------------------------------------------------------
@@ -194,6 +207,135 @@ list_contains() {
     return 1
 }
 
+# lowercase <text>
+lowercase() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# -----------------------------------------------------------------------------
+# Repositories and images (config.env)
+# -----------------------------------------------------------------------------
+# scm_organizations: organizations (GitHub) or groups (GitLab) holding the
+# application repositories, space-separated: SCM_ORGANIZATIONS, else
+# SCM_ORGANIZATION (configuration files written before SCM_ORGANIZATIONS)
+scm_organizations() {
+    echo "${SCM_ORGANIZATIONS:-${SCM_ORGANIZATION:-}}"
+}
+
+# registry_host: registry of the application images (host of REGISTRY_BASE
+# when it is set, else REGISTRY_HOST)
+registry_host() {
+    if [ -n "${REGISTRY_BASE:-}" ]; then
+        echo "${REGISTRY_BASE%%/*}"
+    else
+        echo "${REGISTRY_HOST:-$DEFAULT_REGISTRY_HOST}"
+    fi
+}
+
+# image_base <organization>: path of the images of an organization, without the
+# repository name. REGISTRY_BASE (single organization) takes precedence over
+# REGISTRY_HOST/<organization>. The organization is lowercased: registry paths
+# are lowercase, while GitHub keeps the case of the organization login.
+image_base() {
+    if [ -n "${REGISTRY_BASE:-}" ]; then
+        echo "$REGISTRY_BASE"
+    else
+        echo "${REGISTRY_HOST:-$DEFAULT_REGISTRY_HOST}/$(lowercase "$1")"
+    fi
+}
+
+# validate_scm_config: SCM_PROVIDER, the organizations and the registry settings
+validate_scm_config() {
+    local pattern org key seen="" count=0
+    case "${SCM_PROVIDER:-}" in
+        github) pattern='^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$' ;;
+        gitlab) pattern='^[A-Za-z0-9_.][A-Za-z0-9_.-]*(/[A-Za-z0-9_.][A-Za-z0-9_.-]*)*$' ;;
+        *) die "SCM_PROVIDER must be github or gitlab (got: ${SCM_PROVIDER:-})" ;;
+    esac
+    for org in $(scm_organizations); do
+        echo "$org" | grep -Eq "$pattern" \
+            || die "SCM_ORGANIZATIONS: '$org' is not a valid ${SCM_PROVIDER} organization name"
+        key=$(lowercase "$org")
+        # shellcheck disable=SC2086  # word splitting of the list
+        if list_contains "$key" $seen; then
+            die "SCM_ORGANIZATIONS: '$org' is listed twice"
+        fi
+        seen="$seen $key"
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] || die "SCM_ORGANIZATIONS (or SCM_ORGANIZATION) is not set in $VPS_CONFIG_FILE"
+
+    echo "${REGISTRY_HOST:-$DEFAULT_REGISTRY_HOST}" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$' \
+        || die "REGISTRY_HOST: '${REGISTRY_HOST:-}' is not a lowercase registry host (ghcr.io)"
+    if [ -n "${REGISTRY_BASE:-}" ]; then
+        [ "$count" -eq 1 ] \
+            || die "REGISTRY_BASE only applies to a single organization: remove it, the images are then <REGISTRY_HOST>/<organization>/<repository>"
+        echo "$REGISTRY_BASE" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)+$' \
+            || die "REGISTRY_BASE: '$REGISTRY_BASE' is not a lowercase registry path (ghcr.io/my-org)"
+    fi
+}
+
+# validate_image_reference <reference>: lowercase repository path with a tag
+# and/or a digest. "latest" is refused: a tag is pulled once per node, so a
+# moving tag would never be updated.
+validate_image_reference() {
+    local name
+    echo "$1" | grep -Eq '^([a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?/)?[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(@sha256:[a-f0-9]{64})?$' \
+        || return 1
+    case "$1" in
+        *@sha256:*) return 0 ;;
+    esac
+    name="${1##*/}"
+    case "$name" in
+        *:latest) return 1 ;;
+        *:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# Keycloak (config.env)
+# -----------------------------------------------------------------------------
+# keycloak_rate_limit_rate, keycloak_rate_limit_burst: gateway rate limit of the
+# Keycloak OIDC endpoints, "off" for the rate disables it
+keycloak_rate_limit_rate() {
+    echo "${KEYCLOAK_RATE_LIMIT_RATE:-$DEFAULT_KEYCLOAK_RATE_LIMIT_RATE}"
+}
+
+keycloak_rate_limit_burst() {
+    echo "${KEYCLOAK_RATE_LIMIT_BURST:-$DEFAULT_KEYCLOAK_RATE_LIMIT_BURST}"
+}
+
+# validate_keycloak_config: KEYCLOAK_EXTENSION_IMAGES and the gateway rate limit
+validate_keycloak_config() {
+    local image
+    for image in ${KEYCLOAK_EXTENSION_IMAGES:-}; do
+        validate_image_reference "$image" \
+            || die "KEYCLOAK_EXTENSION_IMAGES: '$image' needs a lowercase name and a tag (not latest) or a digest"
+    done
+    if [ "$(keycloak_rate_limit_rate)" != "off" ]; then
+        keycloak_rate_limit_rate | grep -Eq '^[1-9][0-9]*r/[sm]$' \
+            || die "KEYCLOAK_RATE_LIMIT_RATE: '$(keycloak_rate_limit_rate)' is not a rate (10r/s, 600r/m) or off"
+        keycloak_rate_limit_burst | grep -Eq '^[0-9]+$' \
+            || die "KEYCLOAK_RATE_LIMIT_BURST: '$(keycloak_rate_limit_burst)' is not a number of requests"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Off-site backups (config.env)
+# -----------------------------------------------------------------------------
+# validate_offsite_config: OFFSITE_BACKUP_REPOSITORY (restic repository on an
+# S3-compatible object storage, optional) and OFFSITE_BACKUP_REGION
+validate_offsite_config() {
+    [ -n "${OFFSITE_BACKUP_REPOSITORY:-}" ] || return 0
+    echo "$OFFSITE_BACKUP_REPOSITORY" | grep -Eq '^s3:(https?://)?[A-Za-z0-9.-]+(:[0-9]+)?/[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9._-]+)*/?$' \
+        || die "OFFSITE_BACKUP_REPOSITORY: '$OFFSITE_BACKUP_REPOSITORY' is not a restic S3 repository (s3:https://<endpoint>/<bucket>/<path>)"
+    if [ -n "${OFFSITE_BACKUP_REGION:-}" ]; then
+        echo "$OFFSITE_BACKUP_REGION" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' \
+            || die "OFFSITE_BACKUP_REGION: '$OFFSITE_BACKUP_REGION' is not a region name (fr-par)"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Templates
 # -----------------------------------------------------------------------------
@@ -224,6 +366,37 @@ render_template() {
         done
         envsubst "$shell_format" < "$template"
     )
+}
+
+# render_keycloak_manifest [image]...: Keycloak StatefulSet and Services
+# (templates/keycloak/keycloak.yaml.tpl). Each extension image gets an
+# initContainer copying its /themes and /providers into the volumes mounted on
+# /opt/keycloak/themes and /opt/keycloak/providers; without image, the
+# manifest has no initContainer and no volume.
+render_keycloak_manifest() {
+    local dir="$VPS_TEMPLATES_DIR/keycloak" image index=0 init_containers="" pod="" container=""
+    for image in "$@"; do
+        validate_image_reference "$image" \
+            || die "Keycloak extension image '$image': lowercase name and a tag (not latest) or a digest"
+        index=$((index + 1))
+        init_containers="$init_containers$(render_template "$dir/extension-init-container.yaml.tpl" \
+            "EXTENSION_NAME=extension-$index" "EXTENSION_IMAGE=$image")"$'\n'
+    done
+    if [ "$index" -gt 0 ]; then
+        pod=$(render_template "$dir/extensions-pod.yaml.tpl" \
+            "INIT_CONTAINERS=$init_containers" "PULL_SECRET=$KEYCLOAK_PULL_SECRET")
+        container=$(render_template "$dir/extensions-container.yaml.tpl")
+    fi
+    render_template "$dir/keycloak.yaml.tpl" \
+        "KEYCLOAK_POD_EXTENSIONS=$pod" "KEYCLOAK_CONTAINER_EXTENSIONS=$container"
+}
+
+# render_keycloak_rate_limit: RateLimitPolicy of the Keycloak HTTPRoute
+# (templates/gateway/keycloak-rate-limit.yaml.tpl), from KEYCLOAK_RATE_LIMIT_RATE
+# and KEYCLOAK_RATE_LIMIT_BURST
+render_keycloak_rate_limit() {
+    render_template "$VPS_TEMPLATES_DIR/gateway/keycloak-rate-limit.yaml.tpl" \
+        "RATE=$(keycloak_rate_limit_rate)" "BURST=$(keycloak_rate_limit_burst)"
 }
 
 # -----------------------------------------------------------------------------

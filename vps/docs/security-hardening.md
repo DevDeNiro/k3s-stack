@@ -36,7 +36,9 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
 - **NetworkPolicies** (`manifests/network-policies.yaml`) :
   - PostgreSQL est joignable uniquement depuis Keycloak, les namespaces applicatifs
     (label `app.kubernetes.io/managed-by=k3s-stack`) et les CronJobs de sauvegarde ;
-  - Redis et Keycloak sont restreints de la même façon ;
+  - Redis et Keycloak sont restreints de la même façon ; Keycloak ne sort que vers
+    PostgreSQL, le DNS, le HTTPS (fournisseurs d'identité OIDC) et le SMTP 587/465 (emails
+    du realm via un relais), ces deux derniers vers les adresses publiques uniquement ;
   - Grafana et le serveur Argo CD n'acceptent aucune connexion entrante (accès par
     port-forward uniquement).
   - La NetworkPolicy du chart PostgreSQL est désactivée : elle ouvrait le port 5432 à
@@ -54,6 +56,10 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
   du script.
 - Clé Sealed Secrets sauvegardée chiffrée (AES-256-CBC, PBKDF2 600 000 itérations) dans
   `/var/backups/k3s-stack/sealed-secrets/`. **Copier chaque sauvegarde hors du serveur.**
+- Identifiants saisis par l'opérateur (token des dépôts, webhook Discord, clés du stockage
+  objet et mot de passe restic) : lus sans écho, jamais en argument. Le mot de passe restic
+  se range aussi dans un gestionnaire de mots de passe (`export-secrets.sh show
+  offsite-backup`) : sans lui, la copie hors site est indéchiffrable.
 
 ### PostgreSQL
 
@@ -72,8 +78,32 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
 - Keycloak : seuls `/realms` et `/resources` sont routés. Le realm `master` est répondu
   par la gateway sans atteindre Keycloak (vérifié avec `%6Daster`, `//`, `..` et
   `%2e%2e`), et la console d'administration n'est pas routée.
+- Limite de débit par adresse cliente sur les endpoints OIDC de Keycloak (RateLimitPolicy
+  `keycloak` de NGINX Gateway Fabric, `limit_req` : `KEYCLOAK_RATE_LIMIT_RATE` par défaut
+  `10r/s`, rafale `KEYCLOAK_RATE_LIMIT_BURST` de `20`, puis réponses `429`). Les assets de
+  connexion (`/resources`, HTTPRoute `keycloak-resources`) ne sont pas limités : une page de
+  connexion ne coûte qu'une ou deux requêtes limitées. La détection de force brute du realm
+  reste la protection des comptes. Les applications posent leur propre RateLimitPolicy sur
+  leurs chemins sensibles.
 - Grafana, Prometheus, Alertmanager et Argo CD ne sont accessibles que par
   `kubectl port-forward`.
+
+### Journaux d'accès (minimisation)
+
+Les URLs peuvent porter des secrets : jetons d'opposition `/stop/<jeton>`, codes et `state`
+OAuth, `id_token_hint` de déconnexion.
+
+| Niveau | Mesure | Fichier |
+|--------|--------|---------|
+| Passerelle | journal d'accès JSON (NginxProxy de NGF) : chemin `$uri` sans query string, sans Referer (il porte l'URL complète de la page précédente) | `values/nginx-gateway-fabric.yaml` |
+| Loki | étapes `replace` de Promtail : le jeton des chemins `/stop/<jeton>` et les valeurs `code`, `state`, `session_state`, `id_token_hint` des query strings sont remplacés par `<redacted>`, quel que soit le pod | `values/promtail.yaml` |
+
+Ce qui reste : les fichiers du nœud (`/var/log/pods/`, root uniquement, lus par
+`kubectl logs`) gardent les lignes brutes jusqu'à leur rotation par le kubelet (10 Mio par
+fichier, 5 fichiers par conteneur avec les réglages par défaut de K3s) ou la suppression du
+pod. Pour la passerelle, ce sont les chemins `/stop/<jeton>` (jamais les query strings) ;
+pour les applications, ce qu'elles journalisent elles-mêmes : ne pas journaliser d'URL
+complète côté application. Loki conserve 7 jours de journaux déjà masqués.
 
 ### Chaîne d'approvisionnement
 
@@ -84,8 +114,15 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
 
 ## Limites connues
 
-- **Pas de sauvegarde hors site automatique** : les dumps PostgreSQL et les sauvegardes
-  K3s restent sur le serveur (prévu plus tard).
+- **Copie hors site partielle** : la copie chiffrée restic (optionnelle,
+  `OFFSITE_BACKUP_REPOSITORY`, voir [`postgres-backup.md`](postgres-backup.md)) ne couvre
+  que les dumps PostgreSQL. La sauvegarde de la clé Sealed Secrets et celles de K3s se
+  copient hors du serveur à la main. Les clés du stockage objet rangées sur le serveur
+  peuvent aussi supprimer le dépôt : activer le versioning ou le verrouillage d'objets du
+  bucket chez le fournisseur.
+- Les images d'extension Keycloak (`KEYCLOAK_EXTENSION_IMAGES`) exécutent leurs providers
+  avec tous les droits de Keycloak (base, identifiants) : n'utiliser que des images de
+  confiance, référencées par un tag immuable ou un digest.
 - PostgreSQL accepte encore les connexions en clair des clients qui ne demandent pas TLS
   (R2DBC est en `sslMode=disable` par défaut) : ajouter `sslMode=require` côté
   application. Il sera ensuite possible d'exiger TLS côté serveur.
@@ -194,7 +231,7 @@ PostgreSQL, sauvegardes locales) et `/root/.k3s-secrets` sont supprimés.
 
 ```bash
 cp vps/config.env.example vps/config.env
-nano vps/config.env           # GATEWAY_HOSTNAMES, AUTH_HOSTNAMES, SCM_*, REGISTRY_BASE, LETSENCRYPT_EMAIL
+nano vps/config.env           # GATEWAY_HOSTNAMES, AUTH_HOSTNAMES, SCM_*, REGISTRY_HOST, LETSENCRYPT_EMAIL, OFFSITE_BACKUP_*
 ./vps/scripts/apply-config.sh --check
 ./vps/install.sh
 ```
@@ -265,13 +302,18 @@ enregistrer le nouveau, ainsi que dans les SealedSecrets des applications qui l'
 
 ### 12. Redonner accès aux dépôts
 
-Argo CD découvre alors les dépôts et déploie les applications :
+Argo CD découvre alors les dépôts de chaque organisation de `SCM_ORGANIZATIONS` et
+déploie les applications (token GitHub classique, droits `repo` et `read:packages`) :
 
 ```bash
 ./vps/scripts/export-secrets.sh set-scm-credentials github
 kubectl get applications -n argocd
 kubectl get sealedsecrets -A
 ```
+
+Puis les identifiants de la copie hors site (le mot de passe restic du dépôt existant,
+depuis le gestionnaire de mots de passe) : `./vps/scripts/setup-secrets.sh
+set-offsite-backup`.
 
 ### 13. Vérifier
 
@@ -300,7 +342,9 @@ grep -c -F -f <(grep '^POSTGRES_ADMIN_PASSWORD=' /root/.k3s-secrets/credentials.
 
 ## Changements visibles par rapport à l'ancienne plateforme
 
-- `config.env` : `DOMAIN` est remplacé par `GATEWAY_HOSTNAMES` et `AUTH_HOSTNAMES`.
+- `config.env` : `DOMAIN` est remplacé par `GATEWAY_HOSTNAMES` et `AUTH_HOSTNAMES` ;
+  `SCM_ORGANIZATIONS` (plusieurs organisations) et `REGISTRY_HOST` complètent
+  `SCM_ORGANIZATION` et `REGISTRY_BASE`, toujours lus pour une organisation unique.
 - kubectl depuis le poste passe par un tunnel SSH (le port 6443 est fermé).
 - Grafana est servi à la racine (plus de sous-chemin `/grafana`).
 - Le webhook Discord utilise l'intégration native d'Alertmanager : URL sans `/slack`.

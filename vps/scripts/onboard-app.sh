@@ -7,7 +7,8 @@ set -euo pipefail
 #     (templates/onboarding/namespace.yaml.tpl, config/onboarding/<env>.env)
 #   - PostgreSQL role and database <app>-<env> and the Secret <app>-db;
 #     an existing password is never changed
-#   - image pull Secret ghcr-secret and the Argo CD repository Secret
+#   - image pull Secret ghcr-secret and the Argo CD repository Secret of
+#     <organization>/<app> (--organization, default: first of SCM_ORGANIZATIONS)
 #   - with --with-cicd: a deployer ServiceAccount and its kubeconfig
 # Public hostnames are declared in config.env (GATEWAY_HOSTNAMES) and served by
 # setup-gateway-api.sh.
@@ -22,19 +23,23 @@ TARGET_ENVS=(alpha prod)
 SKIP_DATABASE=false
 WITH_CICD=false
 APP_SECRETS_FILE=""
+ORGANIZATION=""
 
 usage() {
     printf '%s\n' \
-        "Usage: sudo $0 <app-name> [--environment all|alpha|prod] [--skip-database] [--with-cicd]" \
+        "Usage: sudo $0 <app-name> [--environment all|alpha|prod] [--organization ORG]" \
+        "                          [--skip-database] [--with-cicd]" \
         "" \
         "Creates, for each environment (<app>-alpha, <app>-prod): the namespace with its quota" \
         "and Pod Security level, the PostgreSQL database and Secret <app>-db, the image pull" \
         "Secret ghcr-secret and the Argo CD repository Secret." \
         "" \
-        "  --environment ENV  all (default), alpha or prod" \
-        "  --skip-database    no PostgreSQL role, database or <app>-db Secret" \
-        "  --with-cicd        deployer ServiceAccount and kubeconfig for a CI pipeline" \
-        "                     (Argo CD already pulls the deployments)" \
+        "  --environment ENV   all (default), alpha or prod" \
+        "  --organization ORG  organization of the repository, one of SCM_ORGANIZATIONS" \
+        "                      (default: the first one)" \
+        "  --skip-database     no PostgreSQL role, database or <app>-db Secret" \
+        "  --with-cicd         deployer ServiceAccount and kubeconfig for a CI pipeline" \
+        "                      (Argo CD already pulls the deployments)" \
         "" \
         "Database passwords: ${SECRETS_DIR}/<app>.env (restore it before onboarding" \
         "again after a reinstallation: existing passwords are kept)."
@@ -49,6 +54,11 @@ parse_args() {
                     alpha|prod) TARGET_ENVS=("$2") ;;
                     *) die "--environment expects all, alpha or prod" ;;
                 esac
+                shift
+                ;;
+            --organization|--org)
+                [[ -n "${2:-}" ]] || die "--organization expects an organization of SCM_ORGANIZATIONS"
+                ORGANIZATION="$2"
                 shift
                 ;;
             --skip-database) SKIP_DATABASE=true ;;
@@ -66,6 +76,22 @@ parse_args() {
     [[ "$APP_NAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] \
         || die "application name: lowercase letters, digits and hyphens only"
     APP_SECRETS_FILE="$SECRETS_DIR/${APP_NAME}.env"
+}
+
+# resolve_organization: --organization, or the first organization of
+# SCM_ORGANIZATIONS; it must belong to the list (case-insensitive, as GitHub)
+resolve_organization() {
+    local org first=""
+    for org in $(scm_organizations); do
+        [[ -n "$first" ]] || first="$org"
+        if [[ -n "$ORGANIZATION" && "$(lowercase "$org")" == "$(lowercase "$ORGANIZATION")" ]]; then
+            ORGANIZATION="$org"
+            return 0
+        fi
+    done
+    [[ -z "$ORGANIZATION" ]] \
+        || die "--organization $ORGANIZATION is not listed in SCM_ORGANIZATIONS ($(scm_organizations))"
+    ORGANIZATION="$first"
 }
 
 # -----------------------------------------------------------------------------
@@ -165,20 +191,21 @@ create_databases() {
 
 create_repository_secrets() {
     step "Registry and repository access"
-    local creds="${SCM_PROVIDER}-repo-creds" token username env repo_url
+    local creds="${SCM_PROVIDER}-repo-creds" token username env repo_url registry
     token=$(secret_value argocd "$creds" password)
     if [[ -z "$token" ]]; then
         warn "No $creds Secret: run export-secrets.sh set-scm-credentials $SCM_PROVIDER, then onboard again"
         return 0
     fi
     username=$(secret_value argocd "$creds" username)
+    registry=$(registry_host)
 
     for env in "${TARGET_ENVS[@]}"; do
-        apply_registry_secret "${APP_NAME}-${env}" ghcr-secret "${REGISTRY_BASE%%/*}" "${username:-git}" "$token"
+        apply_registry_secret "${APP_NAME}-${env}" ghcr-secret "$registry" "${username:-git}" "$token"
     done
-    ok "ghcr-secret (${REGISTRY_BASE%%/*}) in ${TARGET_ENVS[*]/#/${APP_NAME}-}"
+    ok "ghcr-secret ($registry) in ${TARGET_ENVS[*]/#/${APP_NAME}-}"
 
-    repo_url="https://${SCM_PROVIDER}.com/${SCM_ORGANIZATION}/${APP_NAME}.git"
+    repo_url="https://${SCM_PROVIDER}.com/${ORGANIZATION}/${APP_NAME}.git"
     apply_secret argocd "repo-${APP_NAME}" type=git "url=$repo_url" "username=${username:-git}" "password=$token"
     kubectl label secret "repo-${APP_NAME}" -n argocd argocd.argoproj.io/secret-type=repository --overwrite >/dev/null
     ok "Argo CD repository Secret repo-${APP_NAME} ($repo_url)"
@@ -221,18 +248,21 @@ print_summary() {
     echo "  - declare its public hostnames in GATEWAY_HOSTNAMES (vps/config.env), then:"
     echo "      sudo ./vps/scripts/setup-gateway-api.sh"
     echo "  - attach its HTTPRoutes to the Gateway infrastructure-gateway (namespace nginx-gateway)"
-    echo "  - Argo CD deploys helm/${APP_NAME} from the repository (develop -> alpha, main -> prod)"
+    echo "  - Argo CD deploys helm/${APP_NAME} from ${ORGANIZATION}/${APP_NAME}: main -> prod, develop -> alpha"
+    echo "    when the repository has a develop branch (image $(image_base "$ORGANIZATION")/${APP_NAME})"
 }
 
 main() {
     parse_args "$@"
     require_root
     load_config
-    require_config SCM_PROVIDER SCM_ORGANIZATION REGISTRY_BASE
+    require_config SCM_PROVIDER
+    validate_scm_config
+    resolve_organization
     use_k3s_kubeconfig
     umask 077
 
-    banner "Onboarding ${APP_NAME} (${TARGET_ENVS[*]})"
+    banner "Onboarding ${APP_NAME} (${TARGET_ENVS[*]}, organization ${ORGANIZATION})"
     create_namespaces
     create_databases
     create_repository_secrets

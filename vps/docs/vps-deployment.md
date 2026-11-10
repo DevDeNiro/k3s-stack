@@ -38,11 +38,18 @@ nano vps/config.env
 | Variable | Exemple |
 |----------|---------|
 | `SCM_PROVIDER` | `github` |
-| `SCM_ORGANIZATION` | `my-org` |
-| `REGISTRY_BASE` | `ghcr.io/my-org` |
+| `SCM_ORGANIZATIONS` | `my-org other-org` (une ou plusieurs organisations) |
+| `REGISTRY_HOST` | `ghcr.io` (images `ghcr.io/<organisation>/<dépôt>`) |
 | `LETSENCRYPT_EMAIL` | `admin@example.com` |
 | `GATEWAY_HOSTNAMES` | `auth.example.com app.example.com alpha.example.com` |
 | `AUTH_HOSTNAMES` | `auth.example.com` |
+| `KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST` | `10r/s`, `20` (valeurs par défaut) |
+| `KEYCLOAK_EXTENSION_IMAGES` | vide, ou `ghcr.io/my-org/my-app-keycloak-theme:1.0.0` (étape 11) |
+| `OFFSITE_BACKUP_REPOSITORY`, `OFFSITE_BACKUP_REGION` | `s3:https://s3.fr-par.scw.cloud/my-bucket/k3s-stack`, `fr-par` (étape 10) |
+
+`SCM_ORGANIZATION` (une seule organisation) et `REGISTRY_BASE` (chemin d'images fixe) restent
+lus pour les fichiers existants : `REGISTRY_BASE` prime sur `REGISTRY_HOST/<organisation>`
+et n'est accepté qu'avec une seule organisation.
 
 ## Étape 2 : installer
 
@@ -75,9 +82,10 @@ sudo ./vps/scripts/setup-gateway-api.sh             # certificats de production
 ```
 
 Le script crée la Gateway (un listener HTTPS par hostname), les certificats, la
-redirection HTTP vers HTTPS, les routes Keycloak et la résolution interne des hostnames
-publics (les pods joignent `https://auth.example.com` sans sortir du cluster). Il se
-relance après chaque modification de `GATEWAY_HOSTNAMES` ou `AUTH_HOSTNAMES`.
+redirection HTTP vers HTTPS, les routes Keycloak avec la limite de débit de ses endpoints
+OIDC, et la résolution interne des hostnames publics (les pods joignent
+`https://auth.example.com` sans sortir du cluster). Il se relance après chaque modification
+de `GATEWAY_HOSTNAMES`, `AUTH_HOSTNAMES` ou `KEYCLOAK_RATE_LIMIT_*`.
 
 ## Étape 5 : accès aux dépôts pour Argo CD
 
@@ -85,17 +93,22 @@ relance après chaque modification de `GATEWAY_HOSTNAMES` ou `AUTH_HOSTNAMES`.
 sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
 ```
 
-Token GitHub avec les droits `repo` et `read:packages` (ou fine-grained
-`Contents: read`). Argo CD découvre alors les dépôts de l'organisation qui contiennent un
-dossier `helm/` (voir plus bas).
+Un seul token pour toutes les organisations de `SCM_ORGANIZATIONS` : token GitHub
+**classique** avec les droits `repo` et `read:packages` (un token fine-grained est limité à
+un seul propriétaire, et GHCR n'accepte que les tokens classiques). Son propriétaire doit
+pouvoir lire les dépôts et les packages de chaque organisation. Argo CD découvre alors les
+dépôts qui contiennent un dossier `helm/` (voir plus bas), l'Image Updater lit GHCR et
+Keycloak peut tirer des images d'extension privées.
 
 ## Étape 6 : onboarder une application
 
 ```bash
-sudo ./vps/scripts/onboard-app.sh my-app
+sudo ./vps/scripts/onboard-app.sh my-app                              # dépôt de la première organisation
+sudo ./vps/scripts/onboard-app.sh my-app --organization other-org     # dépôt d'une autre organisation
 ```
 
-Pour `my-app-alpha` et `my-app-prod`, le script crée :
+Pour `my-app-alpha` et `my-app-prod` (`--environment prod` pour la production seule), le
+script crée :
 
 - le namespace, avec son quota et son niveau de Pod Security ;
 - le rôle et la base PostgreSQL ;
@@ -145,6 +158,37 @@ sudo ./vps/scripts/harden-host.sh --apply --harden-ssh
 sudo ./vps/scripts/setup-secrets.sh set-discord-webhook
 ```
 
+## Étape 10 (recommandé) : sauvegardes hors site
+
+Une copie chiffrée des dumps PostgreSQL part chaque jour vers un stockage objet compatible
+S3 (restic). Créer un bucket et des clés d'accès chez le fournisseur, renseigner
+`OFFSITE_BACKUP_REPOSITORY` et `OFFSITE_BACKUP_REGION` dans `vps/config.env`, puis :
+
+```bash
+sudo ./vps/scripts/setup-secrets.sh set-offsite-backup   # clés et mot de passe restic, saisis sans écho
+sudo ./vps/scripts/apply-backups.sh
+kubectl create job --from=cronjob/postgres-backup-offsite offsite-first -n storage
+kubectl logs -n storage -l app.kubernetes.io/component=offsite -f
+```
+
+Ranger le mot de passe restic dans un gestionnaire de mots de passe : sans lui, les
+sauvegardes hors site sont indéchiffrables. Restauration et exercice :
+[`postgres-backup.md`](postgres-backup.md).
+
+## Étape 11 (optionnel) : thèmes et providers Keycloak
+
+Les images listées dans `KEYCLOAK_EXTENSION_IMAGES` apportent des thèmes (`/themes/<nom>/`)
+et des providers (`/providers/*.jar`), copiés dans Keycloak à chaque démarrage :
+
+```bash
+nano vps/config.env                        # KEYCLOAK_EXTENSION_IMAGES="ghcr.io/my-org/my-app-keycloak-theme:1.0.0"
+sudo ./vps/scripts/apply-keycloak.sh       # redémarre Keycloak (1 à 2 minutes)
+```
+
+Publier un nouveau tag pour chaque version : un tag déjà tiré n'est pas retéléchargé. Les
+emails du realm (invitations, réinitialisations) passent par un relais SMTP sur le port 587
+ou 465, autorisé par la NetworkPolicy de Keycloak.
+
 ## Stratégie IAM et données (recommandée)
 
 ### Alpha (`alpha.example.com`)
@@ -159,10 +203,13 @@ sudo ./vps/scripts/setup-secrets.sh set-discord-webhook
 ## Auto-découverte Argo CD
 
 L'installation configure deux ApplicationSets
-(`templates/argocd/applicationsets.yaml.tpl`). Argo CD parcourt l'organisation et crée,
-pour chaque dépôt contenant `helm/<repo>/`, les Applications `<repo>-alpha` (branche
-`develop`) et `<repo>-prod` (branche `main`). L'Image Updater suit les nouvelles images
-d'après les annotations des Applications.
+(`templates/argocd/applicationsets.yaml.tpl`), avec un générateur par organisation de
+`SCM_ORGANIZATIONS`. Argo CD parcourt chaque organisation et crée, pour chaque dépôt
+contenant `helm/<repo>/`, l'Application `<repo>-prod` (branche `main`), et
+`<repo>-alpha` (branche `develop`) seulement si le dépôt a une branche `develop` contenant
+`helm/`. L'Image Updater suit les nouvelles images `ghcr.io/<organisation>/<repo>` d'après
+les annotations des Applications. Les noms de dépôt doivent être en minuscules et uniques
+entre les organisations.
 
 Structure attendue d'un dépôt :
 
@@ -186,9 +233,10 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controlle
 
 | Problème | Cause |
 |----------|-------|
-| `generated 0 applications` | pas de dossier `helm/`, ou token sans accès au dépôt |
+| `generated 0 applications` | pas de dossier `helm/`, token sans accès à l'organisation, ou (alpha) pas de branche `develop` |
 | `secret scm-token not found` | `export-secrets.sh set-scm-credentials` non exécuté |
 | `ImagePullBackOff` | `ghcr-secret` absent : onboarder après `set-scm-credentials` |
+| Application en double, `duplicate name` | même nom de dépôt dans deux organisations : renommer l'un des dépôts |
 
 ## Dépannage
 
@@ -197,6 +245,8 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controlle
 | Certificat en attente | DNS propagé et port 80 joignable : `kubectl describe certificate -n nginx-gateway`, `kubectl get challenges -A` |
 | Sites injoignables | `kubectl get pods,events -n nginx-gateway` (data plane `infrastructure-gateway-nginx`) |
 | Keycloak : `Unable to resolve issuer` | `kubectl get configmap coredns-custom -n kube-system -o yaml` (relancer `setup-gateway-api.sh`) |
+| Keycloak en `Init:ImagePullBackOff` | référence de `KEYCLOAK_EXTENSION_IMAGES` ; image privée : `set-scm-credentials github`, puis `apply-keycloak.sh` |
+| Keycloak répond `429` | augmenter `KEYCLOAK_RATE_LIMIT_RATE` / `KEYCLOAK_RATE_LIMIT_BURST` (ou `off`), puis `setup-gateway-api.sh` |
 | Application sans base | label `app.kubernetes.io/managed-by=k3s-stack` du namespace, Secret `<app>-db` |
 | K3s ne démarre pas | `systemctl status k3s`, `journalctl -u k3s -n 100` |
 

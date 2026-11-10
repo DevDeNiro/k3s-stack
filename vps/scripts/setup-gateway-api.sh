@@ -8,11 +8,13 @@ set -euo pipefail
 #     HTTPS listener per hostname of GATEWAY_HOSTNAMES
 #   - one Let's Encrypt Certificate per hostname (removed hostnames are pruned)
 #   - HTTPRoute https-redirect: HTTP -> HTTPS
-#   - HTTPRoute keycloak for AUTH_HOSTNAMES: /realms and /resources only,
-#     master realm blocked
+#   - HTTPRoutes keycloak (/realms, master realm blocked) and keycloak-resources
+#     (/resources) for AUTH_HOSTNAMES, and the RateLimitPolicy keycloak of the
+#     OIDC endpoints (KEYCLOAK_RATE_LIMIT_RATE, KEYCLOAK_RATE_LIMIT_BURST)
 #   - ConfigMap kube-system/coredns-custom: pods resolve the public hostnames
 #     to the gateway (hairpin)
-# Run it again after changing GATEWAY_HOSTNAMES or AUTH_HOSTNAMES.
+# Run it again after changing GATEWAY_HOSTNAMES, AUTH_HOSTNAMES or the Keycloak
+# rate limit.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,8 +32,9 @@ usage() {
     printf '%s\n' \
         "Usage: sudo $0 [--staging] [--no-tls] [--dry-run]" \
         "" \
-        "Renders and applies the Gateway, certificates, HTTPS redirection, Keycloak routes" \
-        "and CoreDNS hairpin from GATEWAY_HOSTNAMES and AUTH_HOSTNAMES (vps/config.env)." \
+        "Renders and applies the Gateway, certificates, HTTPS redirection, Keycloak routes and" \
+        "rate limit, and CoreDNS hairpin from GATEWAY_HOSTNAMES, AUTH_HOSTNAMES and" \
+        "KEYCLOAK_RATE_LIMIT_* (vps/config.env)." \
         "" \
         "  --staging  Let's Encrypt staging certificates (untrusted, for tests: no rate limit)" \
         "  --no-tls   HTTP only: no HTTPS listener, certificate or redirection (tests)" \
@@ -137,10 +140,18 @@ apply_https_redirect() {
     render_template "$TEMPLATES/gateway/https-redirect.yaml.tpl" "HOSTNAMES=$hostnames" | apply_manifest
 }
 
+# delete_keycloak_rate_limit: removes the RateLimitPolicy (missing CRD tolerated)
+delete_keycloak_rate_limit() {
+    if [[ "$DRY_RUN" != "true" ]]; then
+        kubectl delete ratelimitpolicy keycloak -n security --ignore-not-found 2>/dev/null || true
+    fi
+}
+
 apply_keycloak_route() {
     if [[ -z "${AUTH_HOSTNAMES:-}" ]]; then
+        delete_keycloak_rate_limit
         if [[ "$DRY_RUN" != "true" ]]; then
-            kubectl delete httproute keycloak -n security --ignore-not-found
+            kubectl delete httproute keycloak keycloak-resources -n security --ignore-not-found
         fi
         return 0
     fi
@@ -162,6 +173,23 @@ apply_keycloak_route() {
     hostnames=$(render_hostnames $AUTH_HOSTNAMES)
     render_template "$TEMPLATES/gateway/keycloak-route.yaml.tpl" \
         "PARENT_REFS=$parent_refs" "HOSTNAMES=$hostnames" | apply_manifest
+    apply_keycloak_rate_limit
+}
+
+# apply_keycloak_rate_limit: RateLimitPolicy of the HTTPRoute keycloak, removed
+# with KEYCLOAK_RATE_LIMIT_RATE=off
+apply_keycloak_rate_limit() {
+    if [[ "$(keycloak_rate_limit_rate)" == "off" ]]; then
+        delete_keycloak_rate_limit
+        warn "Keycloak rate limit disabled (KEYCLOAK_RATE_LIMIT_RATE=off)"
+        return 0
+    fi
+    if [[ "$DRY_RUN" != "true" ]] && ! kubectl get crd ratelimitpolicies.gateway.nginx.org >/dev/null 2>&1; then
+        warn "RateLimitPolicy CRD missing (NGINX Gateway Fabric 2.4 or later, installed by vps/install.sh): rate limit skipped"
+        return 0
+    fi
+    step "Keycloak rate limit ($(keycloak_rate_limit_rate), burst $(keycloak_rate_limit_burst), per client address)"
+    render_keycloak_rate_limit | apply_manifest
 }
 
 # gateway_service: data plane Service created by NGINX Gateway Fabric for the
@@ -223,6 +251,7 @@ main() {
     load_config
     require_config GATEWAY_HOSTNAMES
     validate_gateway_config
+    validate_keycloak_config
     use_k3s_kubeconfig
 
     if [[ "$DRY_RUN" != "true" ]]; then

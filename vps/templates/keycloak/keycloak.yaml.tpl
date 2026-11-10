@@ -1,6 +1,15 @@
 # =============================================================================
-# Keycloak Deployment using Official Image (quay.io/keycloak/keycloak)
-# LTS-friendly, no Bitnami restrictions
+# Keycloak, official image (quay.io/keycloak/keycloak), namespace security
+# Rendered by render_keycloak_manifest (vps/scripts/lib/common.sh) for
+# vps/scripts/apply-keycloak.sh (called by install.sh) and local/install.sh.
+#
+# Extension images (KEYCLOAK_EXTENSION_IMAGES of config.env) fill the two
+# placeholders below (templates/keycloak/extension*.yaml.tpl): one initContainer
+# per image copies its themes and providers into emptyDir volumes mounted on
+# /opt/keycloak/themes and /opt/keycloak/providers. Without image, both stay empty.
+# Keycloak runs "start" without --optimized: at every start it rebuilds itself
+# when the build options or the providers changed, so provider JARs need no
+# custom image.
 # =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
@@ -27,6 +36,7 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+${KEYCLOAK_POD_EXTENSIONS}
       containers:
         - name: keycloak
           # Official image, pinned to an exact patch release (shared with local/install.sh)
@@ -105,6 +115,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+${KEYCLOAK_CONTAINER_EXTENSIONS}
 ---
 apiVersion: v1
 kind: Service

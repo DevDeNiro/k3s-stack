@@ -32,6 +32,7 @@ metadata:
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-automountServiceAccountToken: {{ .Values.serviceAccount.automount | default true }}
+{{- /* "default" would turn an explicit false into true: only a missing key defaults to true */}}
+automountServiceAccountToken: {{ if hasKey .Values.serviceAccount "automount" }}{{ .Values.serviceAccount.automount }}{{ else }}true{{ end }}
 {{- end }}
 {{- end }}

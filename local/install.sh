@@ -6,10 +6,12 @@ set -euo pipefail
 #
 # Same K3s release and flags, Gateway API, GitOps, storage and secret
 # controllers as vps/install.sh. Configuration: local/k3d-config.yaml,
-# local/manifests, local/values and the shared vps/ files (Keycloak manifest,
-# SQL, Keycloak route template).
+# local/manifests, local/values and the shared vps/ files (Keycloak template,
+# SQL, Keycloak route and rate limit templates).
 # Local exceptions: no firewall, no TLS/cert-manager, no audit log; generated
 # passwords are kept in local/*_password.txt (ignored by git).
+# Environment, as KEYCLOAK_* in vps/config.env: KEYCLOAK_EXTENSION_IMAGES,
+# KEYCLOAK_RATE_LIMIT_RATE, KEYCLOAK_RATE_LIMIT_BURST.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +46,11 @@ usage() {
         "  --skip-redis       no Redis" \
         "  --recreate         delete and recreate the cluster when it exists" \
         "  -y, --yes          no confirmation prompt (with --recreate)" \
-        "  -h, --help         this help"
+        "  -h, --help         this help" \
+        "" \
+        "Environment (Keycloak, as in vps/config.env): KEYCLOAK_EXTENSION_IMAGES (theme and" \
+        "provider images, local ones loaded with 'k3d image import'), KEYCLOAK_RATE_LIMIT_RATE" \
+        "and KEYCLOAK_RATE_LIMIT_BURST."
 }
 
 parse_args() {
@@ -68,6 +74,7 @@ parse_args() {
         die "Keycloak needs PostgreSQL (remove --skip-postgres)"
     fi
     require_supported_k3s "$K3S_VERSION"
+    validate_keycloak_config
 }
 
 # local_password <file>: password stored in local/<file>, generated on first use
@@ -181,13 +188,25 @@ install_keycloak() {
     pg_admin_exec "$VPS_SQL_DIR/ensure-role-database.sql" \
         role=keycloak "password=$db_password" database=keycloak reset_password=true
 
-    kubectl apply -f "$VPS_MANIFESTS_DIR/keycloak.yaml"
+    # Same template as the VPS, with the extension images of KEYCLOAK_EXTENSION_IMAGES
+    # shellcheck disable=SC2086  # word splitting of the image list
+    render_keycloak_manifest ${KEYCLOAK_EXTENSION_IMAGES:-} | kubectl apply -f -
 
-    # Same public routes as the VPS (master realm blocked), on the local HTTP listener
+    # Same public routes and rate limit as the VPS (master realm blocked), on the
+    # local HTTP listener
     parent_refs=$(render_template "$VPS_TEMPLATES_DIR/gateway/listener-ref.yaml.tpl" LISTENER=http)
     hostnames=$(render_template "$VPS_TEMPLATES_DIR/gateway/hostname-item.yaml.tpl" "HOST=$LOCAL_AUTH_HOST")
     render_template "$VPS_TEMPLATES_DIR/gateway/keycloak-route.yaml.tpl" \
         "PARENT_REFS=$parent_refs" "HOSTNAMES=$hostnames" | kubectl apply -f -
+    if ! kubectl get crd ratelimitpolicies.gateway.nginx.org >/dev/null 2>&1; then
+        # Helm installs the CRDs of a chart only once: a cluster created with an older
+        # NGINX Gateway Fabric lacks it (--recreate)
+        warn "RateLimitPolicy CRD missing: Keycloak rate limit skipped (./local/install.sh --recreate)"
+    elif [[ "$(keycloak_rate_limit_rate)" == "off" ]]; then
+        kubectl delete ratelimitpolicy keycloak -n security --ignore-not-found >/dev/null
+    else
+        render_keycloak_rate_limit | kubectl apply -f -
+    fi
 
     kubectl rollout status statefulset/keycloak -n security --timeout=600s >/dev/null \
         || warn "Keycloak is still starting: kubectl get pods -n security"

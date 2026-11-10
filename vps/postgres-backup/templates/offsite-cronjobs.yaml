@@ -1,0 +1,163 @@
+{{- /*
+Off-site copy of the dump volume (restic, S3-compatible object storage):
+  <release>-offsite        daily: restic init on the first run, backup, forget --prune
+  <release>-offsite-check  weekly: restic check
+Credentials: Secret offsite.existingSecret (setup-secrets.sh set-offsite-backup).
+*/ -}}
+{{- if .Values.offsite.enabled }}
+{{- $root := . }}
+{{- $offsite := .Values.offsite }}
+{{- if not .Values.localStorage.enabled }}
+{{- fail "offsite.enabled needs localStorage.enabled: the off-site copy reads the dump volume" }}
+{{- end }}
+{{- $repository := required "offsite.repository is required when offsite.enabled is true" $offsite.repository }}
+{{- $tag := required "offsite.image.tag is required when offsite.enabled is true (RESTIC_VERSION of vps/config/versions.env)" $offsite.image.tag }}
+{{- $mountPath := .Values.localStorage.mountPath }}
+{{- range $component := list "offsite" "offsite-check" }}
+{{- $backup := eq $component "offsite" }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $root.Release.Name }}-{{ $component }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: postgres-backup
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  schedule: {{ ternary $offsite.backup.cron $offsite.check.cron $backup | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ $offsite.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: postgres-backup
+            app.kubernetes.io/instance: {{ $root.Release.Name }}
+            app.kubernetes.io/component: {{ $component }}
+        spec:
+          restartPolicy: OnFailure
+          # Pod Security "restricted" profile: restic only writes to its cache and /tmp
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: restic
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              image: "{{ with $offsite.image.registry }}{{ . }}/{{ end }}{{ $offsite.image.repository }}:{{ $tag }}"
+              imagePullPolicy: {{ $offsite.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  {{- if $backup }}
+                  echo "=========================================="
+                  echo "[INFO] Off-site copy of {{ $mountPath }} (restic)"
+                  echo "[INFO] Repository: ${RESTIC_REPOSITORY}"
+                  echo "=========================================="
+
+                  # First run: restic exits with code 10 when the repository does not exist
+                  status=0
+                  restic cat config --no-lock > /dev/null || status=$?
+                  case "$status" in
+                    0) ;;
+                    10)
+                      echo "[INFO] Repository not found: initializing it"
+                      restic init
+                      ;;
+                    12)
+                      echo "[ERROR] RESTIC_PASSWORD does not open this repository" >&2
+                      exit 12
+                      ;;
+                    *)
+                      echo "[ERROR] Repository unreachable (restic exit code ${status})" >&2
+                      exit "$status"
+                      ;;
+                  esac
+
+                  # Locks left by an interrupted run (only stale locks are removed)
+                  restic unlock
+
+                  restic backup --host "$SNAPSHOT_HOST" --tag postgres-backup {{ $mountPath }}
+                  restic forget --host "$SNAPSHOT_HOST" --tag postgres-backup --group-by host,paths \
+                    --keep-daily {{ $offsite.backup.keepDaily }} --keep-weekly {{ $offsite.backup.keepWeekly }} \
+                    --keep-monthly {{ $offsite.backup.keepMonthly }} --prune
+                  restic snapshots --host "$SNAPSHOT_HOST" --tag postgres-backup --compact
+                  echo "[INFO] Off-site copy completed"
+                  {{- else }}
+                  echo "[INFO] Checking the off-site repository ${RESTIC_REPOSITORY}"
+                  status=0
+                  restic cat config --no-lock > /dev/null || status=$?
+                  if [ "$status" -eq 10 ]; then
+                    echo "[WARN] Repository not created yet: the next off-site copy creates it"
+                    exit 0
+                  elif [ "$status" -ne 0 ]; then
+                    echo "[ERROR] Repository unreachable or wrong RESTIC_PASSWORD (restic exit code ${status})" >&2
+                    exit "$status"
+                  fi
+                  # Locks left by an interrupted run (only stale locks are removed)
+                  restic unlock
+                  restic check{{ with $offsite.check.readDataSubset }} --read-data-subset={{ . }}{{ end }}
+                  echo "[INFO] Repository checked"
+                  {{- end }}
+              env:
+                - name: RESTIC_REPOSITORY
+                  value: {{ $repository | quote }}
+                {{- with $offsite.region }}
+                - name: AWS_DEFAULT_REGION
+                  value: {{ . | quote }}
+                {{- end }}
+                - name: SNAPSHOT_HOST
+                  value: {{ $offsite.snapshotHost | quote }}
+                - name: RESTIC_CACHE_DIR
+                  value: /cache
+                - name: TMPDIR
+                  value: /tmp
+                - name: HOME
+                  value: /tmp
+              # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, RESTIC_PASSWORD
+              envFrom:
+                - secretRef:
+                    name: {{ $offsite.existingSecret }}
+              resources:
+                {{- toYaml $offsite.resources | nindent 16 }}
+              volumeMounts:
+                {{- if $backup }}
+                - name: backup-storage
+                  mountPath: {{ $mountPath }}
+                  readOnly: true
+                {{- end }}
+                - name: cache
+                  mountPath: /cache
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            {{- if $backup }}
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: {{ $root.Release.Name }}-pvc
+                readOnly: true
+            {{- end }}
+            - name: cache
+              emptyDir:
+                sizeLimit: 1Gi
+            - name: tmp
+              emptyDir:
+                sizeLimit: 512Mi
+{{- end }}
+{{- end }}

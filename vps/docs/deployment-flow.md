@@ -79,7 +79,9 @@ running applications with ArgoCD GitOps.
 - `vps/config/versions.env` - Pinned versions
 - `vps/config/k3s/config.yaml` - K3s flags (secrets encryption, audit log)
 - `vps/values/*.yaml` - Helm values (Argo CD, PostgreSQL, NGINX Gateway Fabric, monitoring)
-- `vps/manifests/keycloak.yaml` - Keycloak
+- `vps/templates/keycloak/` - Keycloak, with the theme and provider images of `KEYCLOAK_EXTENSION_IMAGES`
+  (`vps/scripts/apply-keycloak.sh`)
+- `vps/postgres-backup/` - backup CronJobs and optional off-site restic copy (`vps/scripts/apply-backups.sh`)
 
 ### Phase 2: Gateway & TLS Setup
 
@@ -113,7 +115,8 @@ running applications with ArgoCD GitOps.
                               ▼
                    ┌──────────────────────┐
                    │ Keycloak routes on   │
-                   │ AUTH_HOSTNAMES       │
+                   │ AUTH_HOSTNAMES and   │
+                   │ their rate limit     │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -127,8 +130,14 @@ running applications with ArgoCD GitOps.
 **Security notes:**
 
 - Grafana, Prometheus, Alertmanager, Argo CD: `kubectl port-forward` only
-- Keycloak: only `/realms/*` (OAuth/OIDC endpoints) and `/resources/*` (login assets)
-  are routed; the master realm is answered by the gateway, `/admin/*` is not routed
+- Keycloak: only `/realms/*` (OAuth/OIDC endpoints, HTTPRoute `keycloak`) and `/resources/*`
+  (login assets, HTTPRoute `keycloak-resources`) are routed; the master realm is answered by
+  the gateway, `/admin/*` is not routed
+- The RateLimitPolicy `keycloak` limits the OIDC endpoints per client address
+  (`KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST`, `429` above the burst); the login
+  assets are not limited
+- The gateway access logs carry the path without the query string (OAuth codes and states
+  never logged); Promtail masks the tokens of `/stop/<token>` paths before Loki
 - Applications attach their own HTTPRoutes to `infrastructure-gateway` (namespace
   `nginx-gateway`); their hostnames must be listed in `GATEWAY_HOSTNAMES`
 
@@ -143,8 +152,10 @@ running applications with ArgoCD GitOps.
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Prompt for GitHub   │
-                   │  org URL & token     │
+                   │  Prompt for the URL  │
+                   │  prefix covering the │
+                   │  organizations and   │
+                   │  the token           │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -155,15 +166,26 @@ running applications with ArgoCD GitOps.
                    │  - scm-token         │
                    │  - ghcr-registry-    │
                    │    secret            │
+                   │  Secret in security: │
+                   │  - ghcr-secret       │
                    └──────────────────────┘
 ```
 
-**Important:** these Secrets let Argo CD discover and pull the private repositories
-(`github-repo-creds`, `scm-token`) and the Image Updater read GHCR (`ghcr-registry-secret`).
+**Important:** these Secrets let Argo CD discover and pull the private repositories of every
+organization of `SCM_ORGANIZATIONS` (`github-repo-creds`, `scm-token`), the Image Updater read
+GHCR (`ghcr-registry-secret`) and Keycloak pull private extension images (`security/ghcr-secret`).
+
+One token serves every organization: on GitHub, a **classic** personal access token with the
+scopes `repo` and `read:packages` (a fine-grained token is limited to one owner, and GHCR only
+accepts classic tokens). The credential template matches repository URLs by prefix:
+`https://github.com/<org>` for one organization, `https://github.com/` for several.
 
 ### Phase 4: Application Onboarding
 
-**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--skip-database] [--with-cicd]`
+**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--organization ORG] [--skip-database] [--with-cicd]`
+
+`--organization` names the organization of the repository, one of `SCM_ORGANIZATIONS` (default: the first one):
+it sets the URL of the Argo CD repository Secret (`https://github.com/<org>/<app>.git`).
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -216,10 +238,10 @@ running applications with ArgoCD GitOps.
 - Kubeconfigs in `/root/.k3s-secrets/kubeconfigs/` (with `--with-cicd`)
 - Secrets created directly in namespaces (not SealedSecrets); the URLs of `<app>-db` require TLS
 
-For a production-only onboarding:
+For a production-only onboarding of a repository of the organization `other-org`:
 
 ```bash
-sudo ./vps/scripts/onboard-app.sh my-app --environment prod
+sudo ./vps/scripts/onboard-app.sh my-app --environment prod --organization other-org
 ```
 
 The script preserves a known PostgreSQL password and refuses to rotate an existing account when its password is
@@ -291,8 +313,19 @@ webhook.
 The configured tags are `develop-<full-sha>` for Alpha and `main-<full-sha>` for production; this prevents one branch's
 build from being selected into the other environment.
 
-After changing the ApplicationSet template (`vps/templates/argocd/applicationsets.yaml.tpl`)
-or `SCM_ORGANIZATION` / `REGISTRY_BASE`, render and apply it again:
+The ApplicationSets hold one SCM provider generator per organization of `SCM_ORGANIZATIONS`. Each generator carries
+the image path of its organization (`values.imageBase`: `REGISTRY_HOST/<organization, lowercased>`, or `REGISTRY_BASE`
+for a single organization), used by the Image Updater annotation and the `image.repository` parameter:
+`ghcr.io/<organization>/<repository>`. GHCR paths are lowercase; repository names must be lowercase and unique across
+the organizations (they name the Applications and the namespaces).
+
+- **Prod**: every repository whose default branch holds `helm/` gets `<repository>-prod`, following `main`.
+- **Alpha**: only the repositories having a `develop` branch that holds `helm/` get `<repository>-alpha` (generator
+  listing every branch, filter `branchMatch: ^develop$` combined with `pathsExist: [helm]`, checked on that branch).
+  When a repository loses its `develop` branch, the ApplicationSet deletes its alpha Application and resources.
+
+After changing the ApplicationSet templates (`vps/templates/argocd/`) or `SCM_ORGANIZATIONS` / `REGISTRY_HOST` /
+`REGISTRY_BASE`, render and apply them again:
 
 ```bash
 sudo ./vps/scripts/apply-config.sh
@@ -460,7 +493,8 @@ referencing the Secret without `optional: true` stays in `CreateContainerConfigE
 namespaces: the NetworkPolicy of the application chart restricts its own egress.
 
 **Solution:** allow egress to every platform service the application uses: `storage` 5432 (PostgreSQL),
-`database` 6379 (Redis), `security` 80 (Keycloak) and DNS.
+`database` 6379 (Redis), `security` 8080 (Keycloak: NetworkPolicies match the pod port, not the port 80 of its
+Service) and DNS. An application sending emails also needs 587 (or 465) towards its SMTP relay.
 
 ### 7. Rolling Update Refused by the Quota
 
@@ -477,11 +511,13 @@ the pod limits, or raise the quota and run `onboard-app.sh <app>` again.
 | Script                 | Purpose                                         |
 |------------------------|-------------------------------------------------|
 | `install.sh`           | Initial cluster setup (in `vps/`)               |
-| `setup-gateway-api.sh` | Gateway, certificates, Keycloak routes, hairpin |
+| `setup-gateway-api.sh` | Gateway, certificates, Keycloak routes and rate limit, hairpin |
 | `apply-config.sh`      | Argo CD ApplicationSets and Image Updater CRs   |
+| `apply-keycloak.sh`    | Keycloak and its extension images (themes, providers) |
+| `apply-backups.sh`     | PostgreSQL backup CronJobs, off-site restic copy |
 | `onboard-app.sh`       | Per-application setup                           |
 | `export-secrets.sh`    | Credentials, sealing key backup, SCM access     |
-| `setup-secrets.sh`     | Infrastructure secrets, rotation, Discord       |
+| `setup-secrets.sh`     | Infrastructure secrets, rotation, Discord, off-site backup credentials |
 | `harden-host.sh`       | Firewall, SSH and automatic updates             |
 | `k3s-maintenance.sh`   | K3s backups, restores and upgrades              |
 | `setup-remote.sh`      | Workstation kubeconfig through an SSH tunnel    |
@@ -497,9 +533,9 @@ Two public repositories illustrate the two common kinds of applications:
 - [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit): client application (React / Vite
   build served by nginx), without database (`onboard-app.sh <app> --skip-database`).
 
-The auto-discovery deploys a repository once it follows the layout below: a chart in `helm/<repository>/` with
-`values-alpha.yaml` and `values-prod.yaml`, `develop` and `main` branches, images tagged `develop-<sha>` and
-`main-<sha>`.
+The auto-discovery deploys a repository of one of the organizations of `SCM_ORGANIZATIONS` once it follows the layout
+below: a chart in `helm/<repository>/` with `values-prod.yaml` (and `values-alpha.yaml` with a `develop` branch), a
+`main` branch, images `ghcr.io/<organization>/<repository>` tagged `main-<sha>` (and `develop-<sha>`).
 
 ### Application Helm Chart (`helm/<app>/`)
 
@@ -518,6 +554,7 @@ The auto-discovery deploys a repository once it follows the layout below: a char
 |-----------------------------------------------|---------------------------------|
 | `vps/values/argocd.yaml`                      | Argo CD Helm values             |
 | `vps/templates/argocd/applicationsets.yaml.tpl` | Dynamic app generation from Git |
+| `vps/templates/argocd/generator-{alpha,prod}.yaml.tpl` | One SCM generator per organization |
 | `vps/manifests/argocd-image-updaters.yaml`    | Image Updater CRs (alpha, prod) |
 
 ## Quick Reference Commands

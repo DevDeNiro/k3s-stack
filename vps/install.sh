@@ -10,6 +10,9 @@ set -euo pipefail
 #   vps/values/         Helm values
 #   vps/manifests/      static manifests
 #   vps/templates/      manifests rendered from config.env
+# Keycloak, the GitOps configuration and the backups are applied by the scripts
+# that also update them later: scripts/apply-keycloak.sh, apply-config.sh and
+# apply-backups.sh.
 # Changing a major setting means a reinstallation: uninstall.sh --all, then install.sh.
 # =============================================================================
 
@@ -235,9 +238,8 @@ install_keycloak() {
         return 0
     fi
     step "Installing Keycloak"
-    kubectl apply -f "$VPS_MANIFESTS_DIR/keycloak.yaml"
-    kubectl rollout status statefulset/keycloak -n security --timeout=600s \
-        || warn "Keycloak is still starting: kubectl get pods -n security"
+    # templates/keycloak/, with the extension images of KEYCLOAK_EXTENSION_IMAGES
+    bash "$SCRIPT_DIR/scripts/apply-keycloak.sh" --no-restart
 }
 
 install_redis() {
@@ -321,10 +323,9 @@ setup_postgres_backup() {
         return 0
     fi
     step "Installing the PostgreSQL backup CronJobs"
-    # Same image as the server. No --wait: the backup PVC binds when the first
-    # job runs (WaitForFirstConsumer)
-    helm upgrade --install postgres-backup "$SCRIPT_DIR/postgres-backup" --namespace storage \
-        -f "$VPS_VALUES_DIR/postgresql-image.yaml"
+    # Dumps made with the image of the server; off-site restic copy when
+    # OFFSITE_BACKUP_REPOSITORY is set
+    bash "$SCRIPT_DIR/scripts/apply-backups.sh"
 }
 
 apply_network_policies() {
@@ -355,10 +356,20 @@ print_summary() {
     echo -e "  3. DNS: point every hostname of GATEWAY_HOSTNAMES to ${external_ip}"
     echo -e "  4. Gateway, certificates and Keycloak routes:"
     echo -e "     ${BLUE}sudo ./vps/scripts/setup-gateway-api.sh${NC}"
-    echo -e "  5. Repository access for Argo CD:"
-    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh set-scm-credentials github${NC}"
+    echo -e "  5. Repository and registry access for every organization ($(scm_organizations)):"
+    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh set-scm-credentials ${SCM_PROVIDER}${NC}"
     echo -e "  6. Applications:"
-    echo -e "     ${BLUE}sudo ./vps/scripts/onboard-app.sh <app-name>${NC}"
+    echo -e "     ${BLUE}sudo ./vps/scripts/onboard-app.sh <app-name> [--organization <org>]${NC}"
+    if [[ -n "${OFFSITE_BACKUP_REPOSITORY:-}" ]]; then
+        echo -e "  7. Off-site backup credentials (object storage keys, restic password):"
+        echo -e "     ${BLUE}sudo ./vps/scripts/setup-secrets.sh set-offsite-backup${NC}"
+    else
+        echo -e "  7. Recommended: off-site backups (OFFSITE_BACKUP_REPOSITORY, vps/docs/postgres-backup.md)"
+    fi
+    if [[ -n "${KEYCLOAK_EXTENSION_IMAGES:-}" ]]; then
+        echo -e "  8. Private Keycloak extension images: Keycloak pulls them once step 5 is done:"
+        echo -e "     ${BLUE}sudo ./vps/scripts/apply-keycloak.sh${NC}"
+    fi
     echo ""
     echo -e "Credentials: ${BLUE}sudo ./vps/scripts/export-secrets.sh show${NC}"
 }

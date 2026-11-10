@@ -9,7 +9,7 @@ Chaque application onboardée via `onboard-app.sh` dispose de :
 | Namespace       | `<app>-alpha` | `<app>-prod`             |
 | Database        | `<app>-alpha` | `<app>-prod`             |
 | User PostgreSQL | `<app>-alpha` | `<app>-prod`             |
-| Backup auto     | ❌             | ✅ (daily/weekly/monthly) |
+| Backup auto     | ❌             | ✅ (daily/weekly/monthly, copie hors site optionnelle) |
 
 ### Workflow Git → Environnement
 
@@ -19,7 +19,19 @@ Chaque application onboardée via `onboard-app.sh` dispose de :
 | `main`    | `<app>-prod`  | `main-<sha complet>`       |
 
 Le préfixe de branche empêche qu'un build d'une branche soit déployé dans l'autre
-environnement.
+environnement. L'Application alpha n'existe que si le dépôt a une branche `develop`
+contenant `helm/` : un dépôt sans `develop` n'a qu'un environnement de production.
+
+### Plusieurs organisations GitHub
+
+Les ApplicationSets ont un générateur SCM par organisation de `SCM_ORGANIZATIONS`
+(`config.env`), avec un seul token (`export-secrets.sh set-scm-credentials`). Chaque
+générateur porte le chemin des images de son organisation (`values.imageBase`) :
+`REGISTRY_HOST/<organisation en minuscules>`, ou `REGISTRY_BASE` pour une organisation
+unique. Les chemins GHCR sont en minuscules ; les noms de dépôt doivent être en
+minuscules et uniques entre les organisations (ils nomment les Applications et les
+namespaces). `onboard-app.sh --organization <org>` crée le Secret de dépôt Argo CD du
+bon `<org>/<app>`.
 
 ---
 
@@ -35,7 +47,9 @@ ImageUpdater CR → Lit annotations Application → Met à jour image.tag
 
 - `vps/manifests/argocd-image-updaters.yaml` - CRs pour `*-alpha` et `*-prod`
 - `vps/templates/argocd/applicationsets.yaml.tpl` - ApplicationSets et annotations de
-  l'Image Updater (rendus par `scripts/apply-config.sh`)
+  l'Image Updater (rendus par `scripts/apply-config.sh`), image
+  `{{values.imageBase}}/{{repository}}`
+- `vps/templates/argocd/generator-{alpha,prod}.yaml.tpl` - un générateur par organisation
 
 ### Stratégies
 
@@ -151,6 +165,33 @@ kubectl get secret keycloak-secret -n security -o jsonpath='{.data.admin-passwor
 Le mot de passe initial ne sert qu'au premier démarrage : s'il a été changé dans la
 console, utiliser le mot de passe courant.
 
+### Thèmes et providers (images d'extension)
+
+Keycloak garde l'image officielle. Les thèmes et les providers viennent d'images listées
+dans `KEYCLOAK_EXTENSION_IMAGES` (`config.env`) : à chaque démarrage, un initContainer
+par image copie `/themes/<nom>/` dans `/opt/keycloak/themes` et `/providers/*.jar` dans
+`/opt/keycloak/providers` (contrat de l'image : [`../README.md`](../README.md#keycloak-extension-images)).
+Keycloak démarre sans `--optimized` et se reconstruit lui-même quand les providers
+changent. Après une modification des images :
+
+```bash
+sudo ./vps/scripts/apply-keycloak.sh       # rendu, application, redémarrage (1 à 2 minutes)
+```
+
+Une référence porte un tag immuable ou un digest : un tag n'est tiré qu'une fois par
+nœud. Les images privées utilisent le Secret `security/ghcr-secret`
+(`export-secrets.sh set-scm-credentials github`).
+
+### Emails du realm et limite de débit
+
+La NetworkPolicy de Keycloak autorise la sortie SMTP (587 avec STARTTLS, 465) vers les
+adresses publiques : invitations, réinitialisations et vérifications d'email passent par
+un relais SMTP (Scaleway TEM, par exemple). Côté passerelle, la RateLimitPolicy
+`keycloak` limite les endpoints OIDC (`/realms`) par adresse cliente
+(`KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST`, réponse `429`) ; les assets de
+connexion (`/resources`) ne sont pas limités. La détection de force brute du realm
+protège les comptes en complément.
+
 ---
 
 ## Firewall (UFW)
@@ -182,7 +223,11 @@ sudo ./vps/scripts/k3s-maintenance.sh upgrade   # sauvegarde, puis mineure suiva
 ```bash
 kubectl create job --from=cronjob/postgres-backup-daily manual-backup -n storage
 kubectl logs -n storage job/manual-backup -f
+# copie hors site immédiate (avec OFFSITE_BACKUP_REPOSITORY)
+kubectl create job --from=cronjob/postgres-backup-offsite manual-offsite -n storage
 ```
+
+Copie hors site chiffrée (restic), restauration et exercice : [`postgres-backup.md`](postgres-backup.md).
 
 ### Rotation des credentials
 

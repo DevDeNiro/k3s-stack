@@ -28,6 +28,16 @@ config:
       # k3s containerd writes plain text logs - keep both stages for safety.
       - cri: {}
       - docker: {}
+      # Secrets carried by URLs never reach Loki, whatever the pod that logs them
+      # (vps/docs/security-hardening.md): the token of the /stop/<token> paths
+      # (opt-out links) and the OAuth/OIDC values of query strings. Each capture
+      # group is replaced, on every match of the line.
+      - replace:
+          expression: '/stop/([^\s?"#]+)'
+          replace: '<redacted>'
+      - replace:
+          expression: '[?&](?:code|state|session_state|id_token_hint)=([^&\s"#]+)'
+          replace: '<redacted>'
       # Drop noisy kube-system probes from logs
       - match:
           selector: '{namespace="kube-system",container=~"local-path-provisioner|metrics-server"}'

@@ -2,8 +2,9 @@
 # PostgreSQL Backup Configuration - Production Only
 # =============================================================================
 # Backs up ALL production databases (*-prod) + infrastructure (keycloak) to a
-# PVC on the node. Off-site copies are not handled yet: copy the dumps off the
-# server (see vps/docs/postgres-backup.md).
+# PVC on the node, and optionally copies that volume to an encrypted restic
+# repository off the server (offsite below, vps/docs/postgres-backup.md).
+# Installed and upgraded by vps/scripts/apply-backups.sh.
 # =============================================================================
 
 # =============================================================================
@@ -79,3 +80,53 @@ resources:
     limits:
         memory: "256Mi"
         cpu: "500m"
+
+# =============================================================================
+# Off-site Copy (restic), optional
+# =============================================================================
+# The CronJob <release>-offsite copies the dump volume to an encrypted restic
+# repository on an S3-compatible object storage once the dumps of the day are
+# done, then applies the retention below (restic forget --prune). The CronJob
+# <release>-offsite-check verifies the repository every week. A failed job
+# raises the KubeJobFailed alert.
+# vps/scripts/apply-backups.sh enables it when OFFSITE_BACKUP_REPOSITORY is set
+# in vps/config.env (vps/templates/postgres-backup/offsite-values.yaml.tpl).
+offsite:
+    enabled: false
+    # restic repository: s3:https://<endpoint>/<bucket>/<path>
+    repository: ""
+    # Region signing the S3 requests (AWS_DEFAULT_REGION); empty: restic default
+    region: ""
+    # Secret holding AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and RESTIC_PASSWORD
+    # (vps/scripts/setup-secrets.sh set-offsite-backup)
+    existingSecret: postgres-backup-offsite
+    # Host recorded in the snapshots: constant, so that the retention groups the
+    # snapshots of every job pod
+    snapshotHost: postgres-backup
+    backup:
+        # After the daily (03:00), weekly (Sunday 04:00) and monthly (1st, 05:00) dumps
+        cron: "30 5 * * *"
+        # restic forget --prune: snapshots kept
+        keepDaily: 7
+        keepWeekly: 4
+        keepMonthly: 12
+    check:
+        # Sunday 06:30 UTC
+        cron: "30 6 * * 0"
+        # Share of the data downloaded and verified at each check; "": structure only
+        readDataSubset: "10%"
+    # A stuck job (network) is stopped, fails and alerts
+    activeDeadlineSeconds: 7200
+    image:
+        registry: docker.io
+        repository: restic/restic
+        # RESTIC_VERSION of vps/config/versions.env, set by apply-backups.sh
+        tag: ""
+        pullPolicy: IfNotPresent
+    resources:
+        requests:
+            memory: "64Mi"
+            cpu: "50m"
+        limits:
+            memory: "512Mi"
+            cpu: "500m"

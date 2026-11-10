@@ -88,6 +88,13 @@ confirm_uninstall() {
         echo -e "  - Keycloak, Redis, ClusterIssuers, CoreDNS hairpin (coredns-custom)"
         echo -e "  - namespaces: ${INFRA_NAMESPACES[*]} $(app_namespaces | tr '\n' ' ')"
     fi
+    echo -e "  - ${RED}the PostgreSQL data and its local dumps (volumes of the namespace storage)${NC}"
+    if [[ ! -f "$SECRETS_DIR/offsite-backup.env" ]]; then
+        echo -e "    ${YELLOW}No off-site copy is configured: copy the dumps off the server first (vps/docs/postgres-backup.md)${NC}"
+    elif [[ "$REMOVE_SECRETS" == "true" ]]; then
+        echo -e "    ${YELLOW}The off-site copy needs RESTIC_PASSWORD and the bucket keys, removed with ${SECRETS_DIR}:${NC}"
+        echo -e "    ${YELLOW}keep them outside the server first (sudo ./vps/scripts/export-secrets.sh show offsite-backup)${NC}"
+    fi
     if [[ "$REMOVE_SECRETS" == "true" ]]; then
         echo -e "  - generated credentials: ${SECRETS_DIR}"
     fi
@@ -114,7 +121,9 @@ remove_platform() {
     done
 
     step "Removing manifests and cluster-scoped resources"
-    kubectl delete -f "$VPS_MANIFESTS_DIR/keycloak.yaml" --ignore-not-found --timeout=120s
+    # Resource names only: the manifest is rendered without extension image
+    # shellcheck disable=SC2119
+    render_keycloak_manifest | kubectl delete -f - --ignore-not-found --timeout=120s
     kubectl delete -f "$VPS_MANIFESTS_DIR/redis.yaml" --ignore-not-found --timeout=60s
     kubectl delete clusterissuers letsencrypt-staging letsencrypt-prod --ignore-not-found 2>/dev/null || true
     kubectl delete configmap coredns-custom -n kube-system --ignore-not-found

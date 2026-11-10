@@ -66,6 +66,25 @@ nginx:
   # Number of NGINX replicas (when not using HPA)
   replicas: 1
 
+  # Spec of the NginxProxy resource of the chart (GatewayClass parameters).
+  # Access logs (vps/docs/security-hardening.md): one JSON line per request, with
+  # the path of the request ($uri) but never the query string (OAuth codes and
+  # states, tokens passed as parameters) nor the Referer header (it carries the
+  # full URL of the previous page). Promtail masks the tokens carried by paths
+  # before Loki (values/promtail.yaml).
+  config:
+    logging:
+      accessLog:
+        escape: json
+        # Rendered inside a single-quoted log_format directive: no single quote,
+        # no line break (folded below into one line)
+        format: >-
+          {"time":"$time_iso8601","remote_addr":"$remote_addr","host":"$host",
+          "method":"$request_method","path":"$uri","protocol":"$server_protocol",
+          "status":$status,"body_bytes_sent":$body_bytes_sent,"request_time":$request_time,
+          "upstream_status":"$upstream_status","upstream_response_time":"$upstream_response_time",
+          "user_agent":"$http_user_agent"}
+
   # hostPorts 80/443 on a single node: the default rolling update starts the new
   # pod first, which can never be scheduled while the old pod holds the ports, and
   # the data plane keeps its old configuration (port 443 missing after the HTTPS

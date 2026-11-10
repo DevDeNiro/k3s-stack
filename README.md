@@ -5,11 +5,16 @@ Kubernetes platform for a **single VPS**, with a **local k3d mirror** for develo
 ## Overview
 
 - **K3s** v1.37 single node, secrets encrypted at rest, audit log, firewall with the API closed
-- **NGINX Gateway Fabric** (Gateway API) with Let's Encrypt certificates (cert-manager)
-- **PostgreSQL** 18 with TLS and SCRAM, one role and database per application, daily/weekly/monthly backups
-- **Keycloak** 26: only the OIDC endpoints are public, the master realm and the admin console are not
-- **Redis**, **Argo CD** with repository auto-discovery and Image Updater, **Sealed Secrets**
-- **Prometheus, Alertmanager (Discord), Loki, Promtail, Grafana**
+- **NGINX Gateway Fabric** (Gateway API) with Let's Encrypt certificates (cert-manager), access
+  logs without query strings
+- **PostgreSQL** 18 with TLS and SCRAM, one role and database per application, daily/weekly/monthly
+  backups and an optional encrypted off-site copy (restic, S3-compatible storage)
+- **Keycloak** 26: only the OIDC endpoints are public (rate limited per client address), the master
+  realm and the admin console are not; themes and providers come from extension images
+- **Redis**, **Argo CD** with repository auto-discovery across several GitHub organizations and
+  Image Updater, **Sealed Secrets**
+- **Prometheus, Alertmanager (Discord), Loki, Promtail, Grafana**, with secrets carried by URLs
+  masked before Loki
 
 Configuration lives in files (`vps/config`, `vps/templates`, `vps/values`), the scripts hold
 the logic, versions are pinned in [`vps/config/versions.env`](vps/config/versions.env), and a
