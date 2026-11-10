@@ -40,14 +40,6 @@ service:
   type: ClusterIP
   port: 80
 
-# Ingress (configure host after deployment)
-ingress:
-  enabled: false
-  # Enable and configure after installation:
-  # hosts:
-  #   - grafana.yourdomain.com
-  # ingressClassName: nginx
-
 # Datasources auto-provisioning
 # Explicit `uid:` values let dashboards (provisioned via ConfigMap from the app's
 # Helm chart) reference the datasource deterministically across Grafana reinstalls.
@@ -92,6 +84,15 @@ datasources:
 # This is how application charts (e.g. coterie-webapp) ship their own
 # dashboards without coupling to this monitoring stack.
 sidecar:
+  # Shared by the sidecar containers (the dashboard watcher of every namespace
+  # uses ~70Mi: a 64Mi limit gets it OOMKilled)
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 192Mi
   dashboards:
     enabled: true
     label: grafana_dashboard
@@ -102,13 +103,6 @@ sidecar:
     folder: /tmp/dashboards
     provider:
       foldersFromFilesStructure: true
-    resources:
-      requests:
-        cpu: 10m
-        memory: 32Mi
-      limits:
-        cpu: 50m
-        memory: 64Mi
 
 # Dashboard providers
 dashboardProviders:
@@ -178,11 +172,8 @@ dashboards:
       revision: 4
       datasource: Prometheus
 
-# Grafana configuration
+# Grafana configuration (reached through kubectl port-forward, no public route)
 grafana.ini:
-  server:
-    root_url: "%(protocol)s://%(domain)s/grafana"
-    serve_from_sub_path: true
   analytics:
     check_for_updates: false
     reporting_enabled: false

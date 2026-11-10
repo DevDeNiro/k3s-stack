@@ -1,243 +1,177 @@
-# Local Kubernetes Stack (VPS Mirror on K3d)
+# Local mirror of the VPS stack (k3d)
 
-A production-parity Kubernetes environment using [k3d](https://k3d.io/) + [K3s](https://k3s.io/) mirroring the VPS architecture.
+A local Kubernetes cluster built with [k3d](https://k3d.io/) that mirrors the VPS
+platform: same K3s release and flags, same Gateway API controller, same PostgreSQL
+configuration (TLS, SCRAM), same Keycloak manifest and routes, same GitOps and secret
+controllers. Versions come from [`../vps/config/versions.env`](../vps/config/versions.env),
+shared with the VPS.
 
-**Identical routing (Gateway API), GitOps (Argo CD), storage, and secret controllers. What works locally works on the VPS.**
-
----
-
-## Cluster Component Architecture
+## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Client["Local Host Access"]
-        Browser["Browser\n(http://localhost or *.local)"]
+    subgraph Client["Workstation"]
+        Browser["Browser\n(http://coterie.local, http://auth.localhost)"]
         KubeCli["kubectl / helm / k9s\n(context: k3d-dev-cluster)"]
     end
 
-    subgraph K3d["k3d Cluster (dev-cluster)"]
-        subgraph NS_Gateway["Namespace: nginx-gateway"]
-            IGW["Gateway: infrastructure-gateway\n(NGINX Gateway Fabric - Port 80/443)"]
+    subgraph K3d["k3d cluster dev-cluster"]
+        subgraph NS_Gateway["nginx-gateway"]
+            IGW["Gateway infrastructure-gateway\n(NGINX Gateway Fabric, 127.0.0.1:80/443)"]
         end
 
-        subgraph NS_Frontend["Namespace: ns-react-starter-kit"]
-            RouteReact["HTTPRoute: react-starter-kit-route\n(hostnames: react-starter-kit.local, localhost)"]
-            SvcReact["Service: react-starter-kit-service (ClusterIP:80)"]
-            PodReact["Pods: react-starter-kit\n(Nginx + React Vite SPA)"]
+        subgraph NS_App["coterie-webapp-local"]
+            RouteCoterie["HTTPRoute coterie-webapp\n(host: coterie.local)"]
+            PodCoterie["coterie-webapp\n(Spring Boot WebFlux / Kotlin)"]
+            SecDB["Secret coterie-webapp-db"]
+            SecKC["Secret keycloak-client"]
         end
 
-        subgraph NS_Backend["Namespace: coterie-webapp-local"]
-            RouteCoterie["HTTPRoute: coterie-webapp\n(host: coterie.local)"]
-            SvcCoterie["Service: coterie-webapp (ClusterIP:80)"]
-            PodCoterie["Pod: coterie-webapp\n(Spring Boot WebFlux / Kotlin)"]
-            SecDB["Secret: coterie-webapp-db"]
-            SecKC["Secret: keycloak-client"]
-        end
-
-        subgraph NS_Infra["Infrastructure Namespaces"]
-            subgraph NS_Storage["storage"]
-                PG["StatefulSet: postgresql-0\n(postgresql.storage.svc.cluster.local:5432)"]
-            end
-            subgraph NS_Database["database"]
-                Redis["Deployment: redis\n(redis.database.svc.cluster.local:6379)"]
-            end
-            subgraph NS_Security["security"]
-                KC["Deployment: keycloak\n(keycloak.security.svc.cluster.local:8080)"]
-            end
-            subgraph NS_GitOps["argocd"]
-                Argo["Argo CD Controller & Server"]
-            end
-            subgraph NS_System["kube-system"]
-                SS["Sealed Secrets Controller"]
-                DNS["CoreDNS"]
-            end
+        subgraph NS_Infra["Infrastructure namespaces"]
+            PG["storage: postgresql-0\n(TLS, SCRAM)"]
+            Redis["database: redis"]
+            KC["security: keycloak\n(route auth.localhost, master realm blocked)"]
+            Argo["argocd: Argo CD"]
+            SS["kube-system: Sealed Secrets"]
         end
     end
 
-    Browser -->|Port 80/443| IGW
-    IGW -->|parentRefs| RouteReact
-    IGW -->|parentRefs| RouteCoterie
-    RouteReact --> SvcReact --> PodReact
-    RouteCoterie --> SvcCoterie --> PodCoterie
-
+    Browser -->|80/443| IGW
+    IGW --> RouteCoterie --> PodCoterie
+    IGW -->|/realms, /resources| KC
     PodCoterie -.->|R2DBC| PG
-    PodCoterie -.->|Cache & Session| Redis
-    PodCoterie -.->|OAuth2 / OIDC| KC
-
-    SecDB -.->|Env credentials| PodCoterie
-    SecKC -.->|Client secret| PodCoterie
-    SS -.->|Decrypts SealedSecrets into| SecDB
+    PodCoterie -.->|cache, sessions| Redis
+    PodCoterie -.->|OIDC| KC
+    SecDB -.-> PodCoterie
+    SecKC -.-> PodCoterie
 ```
-
----
-
-## Application Request & Data Flow (Spring WebFlux / Coterie)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as User Browser
-    participant GW as NGINX Gateway Fabric (Port 80)
-    participant Spring as Coterie WebApp (Spring WebFlux)
-    participant KC as Keycloak (OAuth2 / OIDC)
-    participant DB as PostgreSQL (storage)
-    participant Redis as Redis (database)
-
-    User->>GW: GET http://coterie.local/ (Session Cookie / Auth Header)
-    GW->>Spring: HTTPRoute reverse-proxy to Service:8080
-    alt Unauthenticated Request
-        Spring-->>User: Redirect to /login or Keycloak Auth Code
-    else Authenticated Request (JWT / Session)
-        Spring->>KC: Validate Token / Introspection (internal keycloak.security:8080)
-        KC-->>Spring: Valid Token + Claims (roles, org_id)
-        Spring->>Redis: Rate limiting & session check
-        Redis-->>Spring: OK
-        Spring->>DB: Execute Reactive Use Case (R2DBC non-blocking)
-        DB-->>Spring: Domain Entities
-        Spring-->>GW: HTML Server-Side Rendered (Kotlinx.html + HTMX)
-        GW-->>User: HTTP 200 OK
-    end
-```
-
----
-
-## Architecture Parity Matrix
-
-| Component | Local (k3d) | VPS (k3s) | Notes |
-|-----------|-------------|-----------|-------|
-| **K3s Version** | `v1.29.0+k3s1` | `v1.29.0+k3s1` | Pinned exact match |
-| **Traffic Ingress** | Gateway API v1.2.0 + NGINX Gateway Fabric 2.4.1 | Gateway API v1.2.0 + NGINX Gateway Fabric 2.4.1 | `infrastructure-gateway` in `nginx-gateway` namespace |
-| **GitOps** | Argo CD v2.14+ in `argocd` | Argo CD in `argocd` | Dynamic App deployment & sync |
-| **Database** | PostgreSQL in `storage` | PostgreSQL in `storage` | Service: `postgresql.storage.svc.cluster.local:5432` |
-| **Cache/Sessions**| Redis in `database` | Redis in `database` | Service: `redis.database.svc.cluster.local:6379` |
-| **Secrets Engine** | Sealed Secrets in `kube-system` | Sealed Secrets in `kube-system` | Public key exported to `local/secrets/` |
-| **IAM** (Optional) | Keycloak in `security` | Keycloak in `security` | Service: `keycloak.security.svc.cluster.local:8080` |
-
----
-
-## Secrets, Passwords & Encryption Explained
-
-In an open-source GitOps stack, secrets are handled in specific ways to avoid leaking credentials:
-
-1. **Sealed Secrets (`sealed-secrets-pub.pem` & `SealedSecret` CRDs)**:
-   - GitOps requires committing Kubernetes manifests to Git. Committing plain `Secret` resources would expose plaintext passwords.
-   - Sealed Secrets uses **asymmetric encryption**: developers encrypt sensitive data with the cluster's public certificate (`local/secrets/sealed-secrets-pub.pem` or fetched via `kubeseal`).
-   - The encrypted `SealedSecret` is safe to commit. Only the in-cluster `sealed-secrets-controller` (in `kube-system`) holds the private key to decrypt it into a live `Secret`.
-2. **`ghcr-secret` (`.dockerconfigjson`)**:
-   - Container registry token used by kubelet to pull private container images from GitHub Container Registry.
-   - Created imperatively per namespace during onboarding to avoid chicken-and-egg dependency locks with Helm PreSync hooks.
-3. **Database Credentials (`<app>-db`)**:
-   - Managed centrally in PostgreSQL (`storage` namespace). Each application receives its own isolated SQL role and logical database (`<app>-<env>`).
-4. **Keycloak Client Secret (`keycloak-client`)**:
-   - OAuth2 client credentials used by the backend to introspect user tokens against Keycloak realms.
-
----
-
-## Database Provisioning & Strategy (Shared vs Per-Namespace)
-
-### The Chosen Pattern: Centralized Instance in `storage` with Logical Isolation
-The stack hosts PostgreSQL inside the `storage` namespace (`postgresql.storage.svc.cluster.local:5432`). Each application/environment gets:
-- A dedicated SQL user: `CREATE USER "<app-env>" WITH PASSWORD '...';`
-- A dedicated logical database: `CREATE DATABASE "<app-env>" OWNER "<app-env>";`
-- A Kubernetes `Secret` in the application namespace containing connection properties.
-
-### Why not 1 Database Pod per Namespace?
-- **Memory Footprint**: A single PostgreSQL instance uses ~350MB of RAM. Running separate PostgreSQL pods per namespace/branch (e.g., 5 ephemeral branches) would consume ~1.8GB of RAM just for database engines, risking `OOMKilled` on a 4-6GB VPS or developer laptop.
-- **Unified Backups**: One automated CronJob in `storage` backs up all databases consistently.
-- **Network Isolation**: Inter-namespace access is controlled via `NetworkPolicies` so only authorized application pods can talk to port 5432.
-
----
 
 ## Prerequisites
 
-- **Docker Desktop** (running)
-- **k3d** (v5.8+) : `scoop install k3d` or `winget install Rancher.k3d`
-- **helm** (v3.14+) : `scoop install helm` or `winget install Helm.Helm`
-- **kubectl** : bundled with Docker Desktop or `winget install Kubernetes.kubectl`
+| Tool | macOS |
+|------|-------|
+| Docker (Docker Desktop or OrbStack) | running |
+| k3d 5.8+ | `brew install k3d` |
+| kubectl | `brew install kubectl` |
+| helm 3.14+ | `brew install helm` |
+| envsubst (templates) | `brew install gettext` |
 
----
+The scripts run with the bash 3.2 of macOS.
 
-## Quick Start
+## Quick start
 
-### 1. Install / Launch the Mirror Stack
 ```bash
-# Minimal stack (Gateway API, Argo CD, Postgres, Redis, Sealed Secrets) - recommended
-./local/install.sh --minimal
-
-# Full stack (including Keycloak and Prometheus/Grafana)
-./local/install.sh --all
-
-# Or with Makefile
-make local-install
+./local/install.sh                  # Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets
+./local/install.sh --all            # plus Keycloak and Prometheus/Grafana
+./local/deploy-app.sh               # coterie-webapp on http://coterie.local
+./local/uninstall.sh                # delete everything
 ```
 
-### 2. Deploy Reference Applications
-```bash
-# Deploys:
-# - react-starter-kit (Frontend SPA) -> http://localhost/ or http://react-starter-kit.local
-# - coterie-webapp (Backend Spring)  -> http://coterie.local
-./local/deploy-app.sh --all
+Makefile shortcuts: `make local-install`, `make local-deploy-apps`, `make local-uninstall`.
 
-# Deploy only frontend SPA:
-./local/deploy-app.sh --react-only
+## Scripts
 
-# Deploy only backend Spring:
-./local/deploy-app.sh --coterie-only
+### `install.sh`
+
+```text
+./local/install.sh [options]
 ```
 
-### 3. Accessing the Applications in Browser
+| Option | Effect |
+|--------|--------|
+| `--minimal` | Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets (default) |
+| `--all` | everything, Keycloak and Prometheus/Grafana included |
+| `--with-keycloak` | Keycloak in `security` (~1 GB RAM), routed on http://auth.localhost |
+| `--with-monitoring` | Prometheus and Grafana in `monitoring` |
+| `--skip-argocd` | no Argo CD |
+| `--skip-postgres` | no PostgreSQL (incompatible with Keycloak) |
+| `--skip-redis` | no Redis |
+| `--recreate` | delete and recreate the cluster when it exists |
+| `-y`, `--yes` | no confirmation prompt (with `--recreate`) |
 
-- **React Starter Kit (SPA)**:
-  - Direct access: **http://localhost/** (works immediately without host modifications)
-  - Virtual host access: **http://react-starter-kit.local** (requires `/etc/hosts` entry)
-- **Coterie WebApp (Backend)**:
-  - Add to `C:\Windows\System32\drivers\etc\hosts` (or `/etc/hosts`):
-    ```text
-    127.0.0.1  coterie.local react-starter-kit.local
-    ```
-  - Access: **http://coterie.local/**
-  - Actuator Health: **http://coterie.local/actuator/health**
+The script is idempotent: run it again to add a component. It warns when an existing
+cluster runs another K3s release than `K3S_VERSION` (`--recreate` aligns it).
+Version overrides work as on the VPS: `K3S_VERSION=... ./local/install.sh --recreate`.
 
----
+### `deploy-app.sh`
 
-## Multi-Cluster Context Switching
+```text
+./local/deploy-app.sh
+```
 
-Your local `~/.kube/config` seamlessly hosts both clusters:
+Deploys `../coterie-webapp/helm/coterie-webapp` with `values-local.yaml`: PostgreSQL role
+and database `coterie-webapp-local`, Secrets `coterie-webapp-db` and `keycloak-client`,
+then the Helm release. The image is pulled from GHCR: create the Secret `ghcr-secret` in
+`coterie-webapp-local` first
+(`kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io ...`), or point
+`values-local.yaml` to a local image loaded with `k3d image import`. Add
+`127.0.0.1 coterie.local` to `/etc/hosts`.
+
+### `uninstall.sh`
+
+```text
+./local/uninstall.sh [--keep-data] [-y]
+```
+
+| Option | Effect |
+|--------|--------|
+| `--keep-data` | keep the volume `k3d-dev-storage` and the passwords (they match the stored data) |
+| `-y`, `--yes` | no confirmation prompt |
+
+## Parity with the VPS
+
+| Component | Local (k3d) | VPS | Notes |
+|-----------|-------------|-----|-------|
+| K3s | v1.37.2+k3s1, secrets encrypted | same | `rancher/k3s` image passed by `install.sh` |
+| Gateway API CRDs | v1.6.3 (shipped with K3s) | same | |
+| NGINX Gateway Fabric | 2.8.1 | same | `local/manifests/infrastructure-gateway.yaml`: HTTP listener only |
+| PostgreSQL | chart 18.12.18, image digest of the VPS | same | `vps/values/postgresql.yaml` then `local/values/postgresql.yaml` |
+| Keycloak | 26.8.2, same manifest and routes | same | HTTP on `auth.localhost` instead of HTTPS |
+| Argo CD | chart 10.17.1 | same | |
+| Sealed Secrets | chart 2.22.0 | same | |
+| Prometheus / Grafana | charts 29.47.0 / 10.5.15 | same (plus Loki, Promtail, Alertmanager rules) | `local/values/` |
+| Redis | 7 | same | |
+
+Local exceptions: no firewall, no TLS on the Gateway (no cert-manager), no audit log, no
+NetworkPolicies, no Pod Security labels, no backups. Ports are published on 127.0.0.1
+only. The `prometheus-config-reloader` image is overridden with a multi-arch release for
+Apple Silicon (`local/values/prometheus.yaml`).
+
+## Secrets and passwords
+
+| File | Content |
+|------|---------|
+| `local/postgres_password.txt` | PostgreSQL superuser, `coterie-webapp-local` and `keycloak` roles |
+| `local/keycloak_password.txt` | Keycloak `admin` user |
+| `local/argocd_password.txt` | Argo CD `admin` user |
+| `local/secrets/sealed-secrets-pub.pem` | public certificate of the **local** cluster |
+
+They are ignored by git. The passwords are generated on first use and deleted by
+`uninstall.sh` (except with `--keep-data`); the certificate is rewritten by every
+installation. It only seals secrets for the local cluster: production secrets are sealed
+with the VPS certificate (`vps/scripts/export-secrets.sh export-cert`).
+
+## Database strategy
+
+One PostgreSQL instance in `storage`, a dedicated role and database per application and
+environment (`<app>-<env>`), the connection settings in a Secret of the application
+namespace. One instance uses ~350 MB of RAM; one database pod per environment would not
+fit on a 4-6 GB server, and a single backup job covers every database.
+
+## Access
+
 ```bash
-# Switch to Local k3d cluster
 kubectl config use-context k3d-dev-cluster
 
-# Switch back to VPS
-kubectl config use-context default
+kubectl port-forward -n argocd svc/argocd-server 8443:80     # http://localhost:8443, admin / local/argocd_password.txt
+kubectl port-forward -n security svc/keycloak 8080:80        # http://localhost:8080/admin, admin / local/keycloak_password.txt
+kubectl port-forward -n monitoring svc/grafana 3000:80       # http://localhost:3000, admin / admin (local values)
+kubectl exec -it -n database deploy/redis -- redis-cli
 ```
 
----
+PostgreSQL (the password stays in the pod):
 
-## Accessing Services & UIs
-
-- **Argo CD UI**:
-  ```bash
-  kubectl port-forward -n argocd svc/argocd-server 8443:80
-  # Open http://localhost:8443
-  # Username: admin
-  # Password in: local/argocd_password.txt
-  ```
-
-- **PostgreSQL CLI**:
-  ```bash
-  kubectl exec -it -n storage postgresql-0 -- psql -U postgres
-  ```
-
-- **Redis CLI**:
-  ```bash
-  kubectl exec -it -n database deploy/redis -- redis-cli
-  ```
-
----
-
-## Cleanup / Teardown
 ```bash
-./local/uninstall.sh
-# or
-k3d cluster delete dev-cluster
+kubectl exec -it -n storage postgresql-0 -c postgresql -- \
+    sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/postgres-password)" exec psql -h 127.0.0.1 -U postgres'
 ```

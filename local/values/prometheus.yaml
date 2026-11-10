@@ -1,35 +1,21 @@
+# =============================================================================
+# Prometheus for the local k3d cluster (local/install.sh --with-monitoring)
+# Minimal footprint; the full VPS configuration lives in vps/values/prometheus.yaml.
+# =============================================================================
 server:
-    persistentVolume:
-        enabled: true
-        size: 8Gi
-    resources:
-        limits:
-            cpu: 500m
-            memory: 512Mi
-        requests:
-            cpu: 200m
-            memory: 256Mi
-    securityContext:
-        runAsUser: 1000
-        runAsNonRoot: true
-        runAsGroup: 1000
-        fsGroup: 1000
+  resources:
+    requests:
+      memory: "128Mi"
+    limits:
+      memory: "512Mi"
 
+# prometheus-config-reloader v0.95.1 (chart default) is published for amd64 only:
+# multi-arch release for Apple Silicon workstations
+configmapReload:
+  prometheus:
+    image:
+      tag: v0.94.0
 alertmanager:
-    enabled: true
-    persistentVolume:
-        enabled: true
-        size: 2Gi
-
-pushgateway:
-    enabled: true
-
-nodeExporter:
-    enabled: true
-
-kubeStateMetrics:
-    enabled: true
-
-serviceAccounts:
-    server:
-        create:
+  configmapReload:
+    image:
+      tag: v0.94.0

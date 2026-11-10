@@ -2,227 +2,121 @@
 set -euo pipefail
 
 # =============================================================================
-# Setup Remote Access to K3s VPS
-# Configures local kubectl to connect to remote VPS K3s cluster
+# Workstation access to the VPS cluster (macOS or Linux, bash 3.2+).
+# The Kubernetes API is closed to the Internet (harden-host.sh): kubectl goes
+# through an SSH tunnel to 127.0.0.1:6443 on the VPS, which the K3s API
+# certificate already covers. Fetches the admin kubeconfig, points it at the
+# tunnel (or at the VPS with --direct) and renames its context.
 # =============================================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
-KUBECONFIG_DIR="${HOME}/.kube"
-CONTEXT_NAME="k3s-vps"
+VPS_HOST=""
+SSH_USER="root"
+SSH_PORT="22"
+LOCAL_PORT="16443"
+CONTEXT="k3s-vps"
+DIRECT=false
 
 usage() {
-    echo "Usage: $0 <vps-ip> [ssh-user] [ssh-port]"
-    echo ""
-    echo "Arguments:"
-    echo "  vps-ip      IP address or hostname of the VPS"
-    echo "  ssh-user    SSH user (default: root)"
-    echo "  ssh-port    SSH port (default: 22)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 192.168.1.100"
-    echo "  $0 192.168.1.100 ubuntu"
-    echo "  $0 my-vps.example.com root 2222"
-    exit 1
+    printf '%s\n' \
+        "Usage: $0 <vps-host> [--user USER] [--port SSH_PORT] [--local-port PORT]" \
+        "                       [--context NAME] [--direct]" \
+        "" \
+        "Writes ~/.kube/config-<context> for the VPS cluster and checks the access." \
+        "" \
+        "  --user USER        SSH user with passwordless sudo (default: root)" \
+        "  --port SSH_PORT    SSH port (default: 22)" \
+        "  --local-port PORT  local end of the SSH tunnel (default: 16443)" \
+        "  --context NAME     kubeconfig context, cluster and user name (default: k3s-vps)" \
+        "  --direct           https://<vps-host>:6443 without tunnel: requires" \
+        "                     harden-host.sh --allow-api-from <your-ip>/32 on the VPS"
 }
 
-# Parse arguments
-VPS_IP="${1:-}"
-SSH_USER="${2:-root}"
-SSH_PORT="${3:-22}"
-
-if [[ -z "$VPS_IP" ]]; then
-    echo -e "${RED}Error: VPS IP is required${NC}"
-    usage
-fi
-
-echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}         K3s VPS Remote Access Setup                           ${NC}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-
-# -----------------------------------------------------------------------------
-# Check prerequisites
-# -----------------------------------------------------------------------------
-check_prerequisites() {
-    echo -e "\n${YELLOW}>>> Checking prerequisites...${NC}"
-    
-    if ! command -v kubectl &> /dev/null; then
-        echo -e "${RED}Error: kubectl is not installed${NC}"
-        echo "Install it from: https://kubernetes.io/docs/tasks/tools/"
-        exit 1
-    fi
-    
-    if ! command -v ssh &> /dev/null; then
-        echo -e "${RED}Error: ssh is not installed${NC}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}✓ Prerequisites met${NC}"
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) SSH_USER="${2:?--user requires a value}"; shift ;;
+            --port) SSH_PORT="${2:?--port requires a value}"; shift ;;
+            --local-port) LOCAL_PORT="${2:?--local-port requires a value}"; shift ;;
+            --context) CONTEXT="${2:?--context requires a value}"; shift ;;
+            --direct) DIRECT=true ;;
+            -h|--help) usage; exit 0 ;;
+            -*) usage; die "unknown option: $1" ;;
+            *)
+                [[ -z "$VPS_HOST" ]] || die "only one VPS host"
+                VPS_HOST="$1"
+                ;;
+        esac
+        shift
+    done
+    [[ -n "$VPS_HOST" ]] || { usage; exit 1; }
+    KUBECONFIG_FILE="$HOME/.kube/config-${CONTEXT}"
 }
 
-# -----------------------------------------------------------------------------
-# Test SSH connection
-# -----------------------------------------------------------------------------
-test_ssh_connection() {
-    echo -e "\n${YELLOW}>>> Testing SSH connection to ${SSH_USER}@${VPS_IP}:${SSH_PORT}...${NC}"
-    
-    if ! ssh -p "$SSH_PORT" -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${VPS_IP}" "echo 'SSH OK'" &> /dev/null; then
-        echo -e "${RED}Error: Cannot connect to ${SSH_USER}@${VPS_IP}:${SSH_PORT}${NC}"
-        echo "Make sure:"
-        echo "  1. The VPS is running"
-        echo "  2. SSH is enabled"
-        echo "  3. Your SSH key is authorized"
-        echo ""
-        echo "Try: ssh -p ${SSH_PORT} ${SSH_USER}@${VPS_IP}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}✓ SSH connection successful${NC}"
+ssh_vps() {
+    ssh -p "$SSH_PORT" -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${VPS_HOST}" "$@"
 }
 
-# -----------------------------------------------------------------------------
-# Check if K3s is running on VPS
-# -----------------------------------------------------------------------------
-check_k3s_running() {
-    echo -e "\n${YELLOW}>>> Checking if K3s is running on VPS...${NC}"
-    
-    if ! ssh -p "$SSH_PORT" "${SSH_USER}@${VPS_IP}" "kubectl get nodes" &> /dev/null; then
-        echo -e "${RED}Error: K3s does not seem to be running on the VPS${NC}"
-        echo "Run the installation script on the VPS first:"
-        echo "  ssh -p ${SSH_PORT} ${SSH_USER}@${VPS_IP}"
-        echo "  git clone <repo> && cd k3d-stack"
-        echo "  sudo ./vps/install-k3s.sh"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}✓ K3s is running${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Fetch kubeconfig from VPS
-# -----------------------------------------------------------------------------
 fetch_kubeconfig() {
-    echo -e "\n${YELLOW}>>> Fetching kubeconfig from VPS...${NC}"
-    
-    # Create kubeconfig directory if it doesn't exist
-    mkdir -p "$KUBECONFIG_DIR"
-    
-    # Define target kubeconfig path
-    KUBECONFIG_FILE="${KUBECONFIG_DIR}/config-${CONTEXT_NAME}"
-    
-    # Fetch kubeconfig
-    scp -P "$SSH_PORT" "${SSH_USER}@${VPS_IP}:/etc/rancher/k3s/k3s.yaml" "$KUBECONFIG_FILE"
-    
-    echo -e "${GREEN}✓ Kubeconfig downloaded to ${KUBECONFIG_FILE}${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Update kubeconfig with correct server address
-# -----------------------------------------------------------------------------
-update_kubeconfig() {
-    echo -e "\n${YELLOW}>>> Updating kubeconfig with VPS address...${NC}"
-    
-    # Replace localhost/127.0.0.1 with actual VPS IP
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS
-        sed -i '' "s/127.0.0.1/${VPS_IP}/g" "$KUBECONFIG_FILE"
-        sed -i '' "s/localhost/${VPS_IP}/g" "$KUBECONFIG_FILE"
-        # Update context name
-        sed -i '' "s/name: default/name: ${CONTEXT_NAME}/g" "$KUBECONFIG_FILE"
+    local server raw
+    step "Fetching the kubeconfig from ${SSH_USER}@${VPS_HOST}"
+    raw=$(ssh_vps 'sudo -n cat /etc/rancher/k3s/k3s.yaml') \
+        || die "cannot read /etc/rancher/k3s/k3s.yaml (SSH key and passwordless sudo required for ${SSH_USER})"
+    if [[ "$DIRECT" == "true" ]]; then
+        server="https://${VPS_HOST}:6443"
     else
-        # Linux
-        sed -i "s/127.0.0.1/${VPS_IP}/g" "$KUBECONFIG_FILE"
-        sed -i "s/localhost/${VPS_IP}/g" "$KUBECONFIG_FILE"
-        sed -i "s/name: default/name: ${CONTEXT_NAME}/g" "$KUBECONFIG_FILE"
+        server="https://127.0.0.1:${LOCAL_PORT}"
     fi
-    
-    # Set proper permissions
-    chmod 600 "$KUBECONFIG_FILE"
-    
-    echo -e "${GREEN}✓ Kubeconfig updated${NC}"
+
+    mkdir -p "$HOME/.kube"
+    (
+        umask 077
+        printf '%s\n' "$raw" | sed -E \
+            -e "s#^([[:space:]]*server:).*#\\1 ${server}#" \
+            -e "s/^([[:space:]]*(- )?(name|cluster|user|current-context)): default$/\\1: ${CONTEXT}/" \
+            > "$KUBECONFIG_FILE"
+    )
+    ok "Kubeconfig: $KUBECONFIG_FILE (server $server, context $CONTEXT)"
 }
 
-# -----------------------------------------------------------------------------
-# Test connection to cluster
-# -----------------------------------------------------------------------------
-test_cluster_connection() {
-    echo -e "\n${YELLOW}>>> Testing connection to K3s cluster...${NC}"
-    
-    export KUBECONFIG="$KUBECONFIG_FILE"
-    
-    if ! kubectl get nodes &> /dev/null; then
-        echo -e "${RED}Error: Cannot connect to K3s cluster${NC}"
-        echo ""
-        echo "Possible issues:"
-        echo "  1. Firewall blocking port 6443"
-        echo "  2. K3s API server not accessible from outside"
-        echo ""
-        echo "On the VPS, ensure port 6443 is open:"
-        echo "  sudo ufw allow 6443/tcp"
-        exit 1
+check_access() {
+    local socket="" status=0
+    step "Checking the access to the cluster"
+    if [[ "$DIRECT" != "true" ]] && ! nc -z 127.0.0.1 "$LOCAL_PORT" >/dev/null 2>&1; then
+        socket="$(mktemp -u "${TMPDIR:-/tmp}/k3s-tunnel.XXXXXX")"
+        ssh -f -N -M -S "$socket" -o ExitOnForwardFailure=yes -p "$SSH_PORT" \
+            -L "${LOCAL_PORT}:127.0.0.1:6443" "${SSH_USER}@${VPS_HOST}"
     fi
-    
-    echo -e "${GREEN}✓ Successfully connected to K3s cluster${NC}"
-    echo ""
-    kubectl get nodes
+    kubectl --kubeconfig "$KUBECONFIG_FILE" get nodes || status=$?
+    if [[ -n "$socket" ]]; then
+        ssh -S "$socket" -O exit -p "$SSH_PORT" "${SSH_USER}@${VPS_HOST}" >/dev/null 2>&1 || true
+    fi
+    [[ $status -eq 0 ]] || die "the cluster is not reachable"
 }
 
-# -----------------------------------------------------------------------------
-# Print usage instructions
-# -----------------------------------------------------------------------------
 print_instructions() {
-    echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}         Setup Complete!                                       ${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    
-    echo -e "\n${YELLOW}Kubeconfig saved to:${NC}"
-    echo -e "  ${KUBECONFIG_FILE}"
-    
-    echo -e "\n${YELLOW}Usage:${NC}"
-    echo -e "  ${BLUE}# Option 1: Set KUBECONFIG environment variable${NC}"
-    echo -e "  export KUBECONFIG=${KUBECONFIG_FILE}"
-    echo -e "  kubectl get pods -A"
-    echo ""
-    echo -e "  ${BLUE}# Option 2: Use --kubeconfig flag${NC}"
-    echo -e "  kubectl --kubeconfig=${KUBECONFIG_FILE} get pods -A"
-    echo ""
-    echo -e "  ${BLUE}# Option 3: Merge with default kubeconfig${NC}"
-    echo -e "  KUBECONFIG=~/.kube/config:${KUBECONFIG_FILE} kubectl config view --flatten > ~/.kube/config.merged"
-    echo -e "  mv ~/.kube/config.merged ~/.kube/config"
-    echo -e "  kubectl config use-context ${CONTEXT_NAME}"
-    
-    echo -e "\n${YELLOW}Quick commands:${NC}"
-    echo -e "  # Check cluster status"
-    echo -e "  kubectl get nodes"
-    echo -e "  kubectl get pods -A"
-    echo ""
-    echo -e "  # Access Grafana (port-forward)"
-    echo -e "  kubectl port-forward -n monitoring svc/grafana 3000:80"
-    echo ""
-    echo -e "  # Access Keycloak (port-forward)"
-    echo -e "  kubectl port-forward -n security svc/keycloak 8080:80"
-    echo ""
-    echo -e "  # View logs"
-    echo -e "  kubectl logs -n <namespace> -f deploy/<deployment>"
-    
-    echo -e "\n${YELLOW}Shell alias (add to ~/.zshrc or ~/.bashrc):${NC}"
-    echo -e "  alias k-vps='kubectl --kubeconfig=${KUBECONFIG_FILE}'"
+    banner "Workstation access ready"
+    if [[ "$DIRECT" != "true" ]]; then
+        echo "1. Open the tunnel (background):"
+        echo "     ssh -fN -L ${LOCAL_PORT}:127.0.0.1:6443 -p ${SSH_PORT} ${SSH_USER}@${VPS_HOST}"
+        echo "   or add a LocalForward to ~/.ssh/config (vps/docs/workstation-setup.md)."
+        echo "2. Use the cluster:"
+    fi
+    echo "     export KUBECONFIG=${KUBECONFIG_FILE}"
+    echo "     kubectl get pods -A"
 }
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
 main() {
-    check_prerequisites
-    test_ssh_connection
-    check_k3s_running
+    parse_args "$@"
+    require_commands ssh kubectl sed
+    if [[ "$DIRECT" != "true" ]]; then
+        require_commands nc
+    fi
     fetch_kubeconfig
-    update_kubeconfig
-    test_cluster_connection
+    check_access
     print_instructions
 }
 

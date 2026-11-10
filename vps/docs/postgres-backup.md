@@ -1,174 +1,103 @@
-# 🗄️ PostgreSQL Backup - Production
+# Sauvegardes PostgreSQL
 
-Système de backup automatisé pour les bases de données de production.
+Le chart `vps/postgres-backup` (installé par `install.sh`) crée trois CronJobs dans le
+namespace `storage`. Ils sauvegardent les bases de production et celle de Keycloak sur
+un volume du serveur. La copie hors site n'est pas encore automatisée.
 
-## Fonctionnalités
+## Fonctionnement
 
-- **Auto-discovery** : Découvre automatiquement toutes les DBs `*-prod`
-- **Infrastructure incluse** : Backup toujours `keycloak`
-- **Multi-schedule** : Daily, Weekly, Monthly avec rétentions différentes
-- **S3 optionnel** : Upload off-site vers S3/MinIO/Scaleway
+| CronJob | Planification (UTC) | Rétention |
+|---------|---------------------|-----------|
+| `postgres-backup-daily` | tous les jours à 03:00 | 7 jours |
+| `postgres-backup-weekly` | le dimanche à 04:00 | 30 jours |
+| `postgres-backup-monthly` | le 1er du mois à 05:00 | 365 jours |
 
-## Schedules par défaut
+- **Bases** : toutes les bases `*-prod` plus `keycloak` (découverte automatique,
+  `databases: auto`). Les bases `*-alpha` ne sont pas sauvegardées.
+- **Format** : `pg_dump -Fc --no-owner --no-acl`, compressé en gzip (`<base>_<date>.dump.gz`).
+  Les rôles et leurs mots de passe ne sont pas inclus : ils sont recréés par `install.sh`
+  (Keycloak) et `onboard-app.sh` (applications).
+- **Image** : celle du serveur, épinglée par digest (`values/postgresql-image.yaml`), donc
+  `pg_dump` a la même version que PostgreSQL.
+- **Réseau** : la NetworkPolicy de PostgreSQL autorise ces jobs (label
+  `app.kubernetes.io/name: postgres-backup`). Les jobs suivent le profil Pod Security
+  `restricted`.
+- **Échecs** : un job en échec déclenche l'alerte `KubeJobFailed` (Alertmanager).
 
-| Type        | Schedule              | Rétention | Cas d'usage                              |
-|-------------|-----------------------|-----------|------------------------------------------|
-| **Daily**   | 03:00 UTC             | 7 jours   | Récupération rapide (erreur utilisateur) |
-| **Weekly**  | Dimanche 04:00 UTC    | 30 jours  | Récupération moyen terme                 |
-| **Monthly** | 1er du mois 05:00 UTC | 365 jours | Archives long terme, compliance          |
+## Emplacement des dumps
 
-## Bases de données sauvegardées
-
-Par défaut (`databases: auto`), le backup inclut :
-
-```
-✓ keycloak           (toujours inclus - infrastructure)
-✓ myapp-prod         (auto-découvert via *-prod)
-✓ another-app-prod   (auto-découvert via *-prod)
-✗ myapp-alpha        (ignoré - pas en -prod)
-```
-
-## Stockage
-
-### Local (par défaut)
-
-Les backups sont stockés dans un PVC de 20Gi :
-
-```
-/backups/
-├── daily/
-│   ├── keycloak_2026-02-03_03-00-00.dump.gz
-│   └── myapp-prod_2026-02-03_03-00-00.dump.gz
-├── weekly/
-│   └── keycloak_2026-02-02_04-00-00.dump.gz
-└── monthly/
-    └── keycloak_2026-02-01_05-00-00.dump.gz
-```
-
-⚠️ **Attention** : Sans S3, les backups sont sur le même VPS. Si le VPS est perdu, les backups le sont aussi.
-
-### S3 Off-site (recommandé pour production)
-
-Activer S3 pour une protection off-site :
-
-```yaml
-# vps/postgres-backup/values.yaml
-s3:
-    enabled: true
-    endpoint: "https://s3.fr-par.scw.cloud"  # Scaleway
-    # endpoint: "https://s3.eu-west-1.amazonaws.com"  # AWS
-    bucket: "my-k3s-backups"
-    region: "fr-par"
-    prefix: "postgres"
-    existingSecret: "s3-backup-credentials"
-```
-
-Créer le secret S3 :
+Les dumps sont écrits sur le PVC `storage/postgres-backup-pvc` (20 Gi, `local-path`),
+c'est-à-dire sur le disque du serveur :
 
 ```bash
-kubectl create secret generic s3-backup-credentials -n storage \
-    --from-literal=access-key="SCWXXXXXXXXX" \
-    --from-literal=secret-key="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+sudo ls -lR /var/lib/rancher/k3s/storage/*_storage_postgres-backup-pvc/
 ```
+
+> **Attention** : `uninstall.sh --k3s` (ou `--all`) supprime ce volume. Copier les dumps
+> avant une réinstallation (voir [`security-hardening.md`](security-hardening.md)).
+
+## Copier les dumps hors du serveur
+
+Depuis le poste :
+
+```bash
+ssh <user>@<vps> 'sudo sh -c "tar -C /var/lib/rancher/k3s/storage -czf - *_storage_postgres-backup-pvc"' \
+    > postgres-backups-$(date +%Y%m%d).tar.gz
+```
+
+Les dumps contiennent les données en clair : les conserver chiffrés.
 
 ## Commandes utiles
 
-### Vérifier les CronJobs
-
 ```bash
-kubectl get cronjobs -n storage
+# CronJobs et derniers jobs
+kubectl get cronjobs,jobs -n storage
+
+# Sauvegarde immédiate et suivi
+kubectl create job --from=cronjob/postgres-backup-daily manual-backup-$(date +%s) -n storage
+kubectl logs -n storage -l app.kubernetes.io/name=postgres-backup --tail=50
 ```
 
-### Lancer un backup manuel
+## Restaurer une base
+
+Sur le serveur, en root. Le mot de passe administrateur passe par stdin, jamais en
+argument de commande. Les objets restaurés appartiennent au rôle de la base.
 
 ```bash
-# Backup daily immédiat
-kubectl create job --from=cronjob/postgres-backup-daily manual-daily -n storage
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+DB=coterie-webapp-prod
+DUMP=/var/lib/rancher/k3s/storage/<volume>/daily/${DB}_<date>.dump.gz
+PGPW=$(kubectl get secret postgresql-secret -n storage -o jsonpath='{.data.postgres-password}' | base64 -d)
 
-# Suivre les logs
-kubectl logs -n storage job/manual-daily -f
+{ printf '%s\n' "$PGPW"; gunzip -c "$DUMP"; } \
+    | kubectl exec -i -n storage postgresql-0 -c postgresql -- sh -c \
+        'IFS= read -r PGPASSWORD; export PGPASSWORD
+         pg_restore -h 127.0.0.1 -U postgres -d "$1" --no-owner --role="$1" --clean --if-exists' restore "$DB"
 ```
 
-### Voir les backups existants
-
-```bash
-# Accéder au PVC
-kubectl exec -it -n storage deploy/postgresql -- ls -la /backups/daily/
-```
-
-### Restaurer un backup
-
-```bash
-# 1. Copier le backup localement
-kubectl cp storage/postgresql-0:/backups/daily/mydb_2026-02-03.dump.gz ./mydb.dump.gz
-
-# 2. Décompresser
-gunzip mydb.dump.gz
-
-# 3. Restaurer
-kubectl exec -i -n storage postgresql-0 -- \
-    env PGPASSWORD="$PASSWORD" pg_restore -U postgres -d mydb --clean --if-exists < mydb.dump
-```
+- La base et le rôle doivent exister (`onboard-app.sh`, ou `install.sh` pour `keycloak`).
+- Arrêter l'application pendant la restauration
+  (`kubectl scale deploy --all -n <namespace> --replicas=0`). Si l'auto-sync d'Argo CD
+  est actif, il la redémarre à la synchronisation suivante : suspendre la synchronisation
+  dans l'interface d'Argo CD le temps de l'opération. Pour Keycloak :
+  `kubectl scale statefulset keycloak -n security --replicas=0`, puis `--replicas=1`.
+- Un dump d'une version plus ancienne de PostgreSQL se restaure sans conversion.
 
 ## Configuration
 
-### Modifier les schedules
+`vps/postgres-backup/values.yaml` :
 
-```yaml
-# vps/postgres-backup/values.yaml
-schedules:
-    daily:
-        enabled: true
-        cron: "0 3 * * *"      # Changer l'heure
-        retentionDays: 7
-    weekly:
-        enabled: true
-        cron: "0 4 * * 0"
-        retentionDays: 30
-    monthly:
-        enabled: false         # Désactiver si non nécessaire
-```
+| Clé | Effet |
+|-----|-------|
+| `schedules.<daily\|weekly\|monthly>` | `enabled`, `cron`, `retentionDays` |
+| `databases` | `auto`, ou une liste explicite de bases |
+| `infrastructureDatabases` | bases toujours incluses (`keycloak`) |
+| `localStorage.storageSize` | taille du PVC |
+| `resources` | ressources des jobs |
 
-### Spécifier les DBs manuellement
-
-```yaml
-# Au lieu de auto-discovery
-databases:
-    - keycloak
-    - myapp-prod
-    - another-app-prod
-```
-
-## Monitoring
-
-### Vérifier le dernier backup
+Appliquer une modification :
 
 ```bash
-# Derniers jobs exécutés
-kubectl get jobs -n storage -l app.kubernetes.io/name=postgres-backup --sort-by=.status.startTime
-
-# Logs du dernier daily
-kubectl logs -n storage -l app.kubernetes.io/component=backup-daily --tail=50
+sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install postgres-backup ./vps/postgres-backup \
+    -n storage -f vps/values/postgresql-image.yaml
 ```
-
-### Alerting (optionnel)
-
-Pour être alerté en cas d'échec, configurer une alerte Prometheus :
-
-```yaml
-# Dans prometheus/rules
--   alert: PostgresBackupFailed
-    expr: kube_job_failed{job_name=~"postgres-backup-.*"} > 0
-    for: 1h
-    labels:
-        severity: critical
-    annotations:
-        summary: "PostgreSQL backup failed"
-```
-
-## Sécurité
-
-- Les backups utilisent `--no-owner --no-acl` pour la portabilité
-- Le format custom (`-Fc`) permet une restauration sélective
-- Les credentials PostgreSQL sont lus depuis un Secret Kubernetes
-- Les credentials S3 (si activé) sont également dans un Secret

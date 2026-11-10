@@ -29,14 +29,24 @@ spec:
             app.kubernetes.io/component: backup-{{ $name }}
         spec:
           restartPolicy: OnFailure
+          # Pod Security "restricted" profile
           securityContext:
             runAsUser: 1001
             runAsGroup: 1001
             fsGroup: 1001
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: backup
-              image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
-              imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              {{- with $root.Values.image }}
+              image: "{{ with .registry }}{{ . }}/{{ end }}{{ .repository }}{{ if .digest }}@{{ .digest }}{{ else }}:{{ .tag }}{{ end }}"
+              imagePullPolicy: {{ .pullPolicy }}
+              {{- end }}
               command:
                 - /bin/bash
                 - -c
@@ -105,31 +115,12 @@ spec:
                     
                     BACKUP_SIZE=$(du -h "${BACKUP_FILE}.gz" | cut -f1)
                     echo "[INFO] ✓ $DB backed up: ${BACKUP_FILE}.gz ($BACKUP_SIZE)"
-                    
-                    {{- if $root.Values.s3.enabled }}
-                    # Upload to S3
-                    echo "[INFO] Uploading $DB to S3..."
-                    S3_PATH="s3://{{ $root.Values.s3.bucket }}/{{ $root.Values.s3.prefix }}/${BACKUP_TYPE}/${DB}_${TIMESTAMP}.dump.gz"
-                    
-                    if aws s3 cp "${BACKUP_FILE}.gz" "$S3_PATH" \
-                      --endpoint-url "{{ $root.Values.s3.endpoint }}" \
-                      --region "{{ $root.Values.s3.region }}"; then
-                      echo "[INFO] ✓ Uploaded to $S3_PATH"
-                    else
-                      echo "[WARN] Failed to upload to S3"
-                    fi
-                    {{- end }}
                   done
                   
                   # Cleanup old local backups
                   echo ""
                   echo "[INFO] Cleaning up backups older than $RETENTION_DAYS days..."
                   find "$BACKUP_DIR" -name "*.dump.gz" -type f -mtime +$RETENTION_DAYS -delete -print || true
-                  
-                  {{- if $root.Values.s3.enabled }}
-                  # Cleanup old S3 backups (simplified - just log, actual cleanup via S3 lifecycle)
-                  echo "[INFO] S3 cleanup should be configured via bucket lifecycle policies"
-                  {{- end }}
                   
                   # Summary
                   echo ""
@@ -152,18 +143,6 @@ spec:
                     secretKeyRef:
                       name: {{ $root.Values.postgresql.existingSecret }}
                       key: {{ $root.Values.postgresql.secretKey }}
-                {{- if $root.Values.s3.enabled }}
-                - name: AWS_ACCESS_KEY_ID
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ $root.Values.s3.existingSecret }}
-                      key: {{ $root.Values.s3.accessKeyKey }}
-                - name: AWS_SECRET_ACCESS_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ $root.Values.s3.existingSecret }}
-                      key: {{ $root.Values.s3.secretKeyKey }}
-                {{- end }}
               resources:
                 {{- toYaml $root.Values.resources | nindent 16 }}
               volumeMounts:

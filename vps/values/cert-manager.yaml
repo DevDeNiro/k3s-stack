@@ -1,0 +1,37 @@
+# =============================================================================
+# cert-manager (chart jetstack/cert-manager) - installed by vps/install.sh
+# Let's Encrypt certificates for the Gateway listeners (HTTP-01 through the Gateway).
+# =============================================================================
+
+crds:
+  # CRDs installed by the chart and kept on "helm uninstall": Certificates and
+  # ClusterIssuers survive a reinstallation of the release.
+  enabled: true
+  keep: true
+
+global:
+  leaderElection:
+    namespace: cert-manager
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
+
+webhook:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+
+cainjector:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 192Mi

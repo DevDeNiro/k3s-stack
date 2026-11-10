@@ -87,10 +87,12 @@ monitoring:
     enabled: false
     grafanaAgent:
       installOperator: false
-  lokiCanary:
-    enabled: false
   serviceMonitor:
     enabled: false
+
+# Loki canary DaemonSet disabled (saves a pod per node)
+lokiCanary:
+  enabled: false
 
 # Test pod disabled
 test:

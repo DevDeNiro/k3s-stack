@@ -1,0 +1,10 @@
+# =============================================================================
+# Helm repositories: added by vps/install.sh, removed by vps/uninstall.sh
+# Format: <name> <url>
+# =============================================================================
+bitnami https://charts.bitnami.com/bitnami
+prometheus-community https://prometheus-community.github.io/helm-charts
+grafana https://grafana.github.io/helm-charts
+argo https://argoproj.github.io/argo-helm
+sealed-secrets https://bitnami.github.io/sealed-secrets
+jetstack https://charts.jetstack.io

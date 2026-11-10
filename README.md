@@ -1,80 +1,73 @@
 # K3s Stack
 
-Production-ready Kubernetes infrastructure for deploying applications on a **single VPS** or **locally** for
-development.
+Kubernetes platform for a **single VPS**, with a **local k3d mirror** for development.
 
 ## Overview
 
-A lightweight K3s stack with everything you need to run containerized applications:
+- **K3s** v1.37 single node, secrets encrypted at rest, audit log, firewall with the API closed
+- **NGINX Gateway Fabric** (Gateway API) with Let's Encrypt certificates (cert-manager)
+- **PostgreSQL** 18 with TLS and SCRAM, one role and database per application, daily/weekly/monthly backups
+- **Keycloak** 26: only the OIDC endpoints are public, the master realm and the admin console are not
+- **Redis**, **Argo CD** with repository auto-discovery and Image Updater, **Sealed Secrets**
+- **Prometheus, Alertmanager (Discord), Loki, Promtail, Grafana**
 
-- **PostgreSQL** — Database with automated backups
-- **Keycloak** — Identity management (SSO/OAuth2/OIDC)
-- **Prometheus + Alertmanager** — Metrics scraping and alerting (pod crashes, OOM, node pressure)
-- **Loki + Promtail** — Centralized log aggregation with LogQL (7-day retention)
-- **Grafana** — Dashboards + unified Explore over Prometheus/Loki/Alertmanager
-- **NGINX Gateway Fabric** — HTTP/HTTPS routing via Kubernetes Gateway API + Let's Encrypt
-- **Argo CD** — GitOps continuous deployment with auto-discovery
-- **Sealed Secrets** — Secure secret management
+Configuration lives in files (`vps/config`, `vps/templates`, `vps/values`), the scripts hold
+the logic, versions are pinned in [`vps/config/versions.env`](vps/config/versions.env), and a
+full reinstallation is the nominal way to apply a major change.
 
-## Deployment Modes
+## Deployment modes
 
-| Mode      | Use Case                                | Documentation                        |
-|-----------|-----------------------------------------|--------------------------------------|
-| **VPS**   | Production on remote server (4-6GB RAM) | [`vps/README.md`](vps/README.md)     |
-| **Local** | Development with k3d + Docker           | [`local/README.md`](local/README.md) |
+| Mode | Use case | Documentation |
+|------|----------|---------------|
+| **VPS** | production on a 4-6 GB server | [`vps/README.md`](vps/README.md) (every script and parameter) |
+| **Local** | development with k3d + Docker | [`local/README.md`](local/README.md) |
 
-## Quick Start
+Security model and migration of an existing VPS:
+[`vps/docs/security-hardening.md`](vps/docs/security-hardening.md).
 
-### VPS (Production)
+## Quick start
+
+### VPS
 
 ```bash
-ssh root@<VPS-IP>
 git clone https://github.com/DevDeNiro/k3s-stack.git && cd k3s-stack
-./vps/install.sh
+cp vps/config.env.example vps/config.env && nano vps/config.env
+sudo ./vps/install.sh
 ```
 
-→ See [`vps/docs/vps-deployment.md`](vps/docs/vps-deployment.md) for the complete guide.
+Then follow [`vps/docs/vps-deployment.md`](vps/docs/vps-deployment.md).
 
-### Local (Development)
+### Local
 
 ```bash
-./local/install.sh --minimal
-./local/deploy-app.sh --all
+./local/install.sh --all
+./local/deploy-app.sh
 ```
 
-→ See [`local/README.md`](local/README.md) for details.
+## Project structure
 
-## Project Structure
-
-```
+```text
 k3s-stack/
-├── vps/           # Scripts and configs for VPS deployment
-├── local/         # Scripts and configs for local k3d
-├── charts/        # Shared Helm charts
-└── docs/          # Detailed documentation
+├── vps/        # VPS installation: scripts, configuration, templates, Helm values, docs
+├── local/      # k3d mirror: scripts and local differences
+└── charts/     # common-library, shared Helm chart of the applications (published to GHCR)
 ```
 
-## Helm Lint (CI)
+## Checks
 
 ```bash
-make helm-test      # Lint + template validation
-make helm-lint      # Lint only
-make helm-template  # Template validation only
+make lint           # ShellCheck on every script
+make helm-test      # Helm lint and template validation
 ```
 
 ## Cleanup
 
 ```bash
-# VPS - partial (keeps K3s + Helm)
-./vps/uninstall.sh
-
-# VPS - full removal
-./vps/uninstall.sh --all
-
-# Local
-./local/uninstall.sh
+sudo ./vps/uninstall.sh          # platform only, K3s kept
+sudo ./vps/uninstall.sh --all    # K3s and Helm too (full reinstallation)
+./local/uninstall.sh             # local cluster
 ```
 
 ## License
 
-Apache-2.0 license
+Apache-2.0

@@ -2,480 +2,215 @@
 set -euo pipefail
 
 # =============================================================================
-# K3s VPS Secrets Export
-# Securely export secrets on-demand without persistent storage in user home
+# Credentials and secret operations of the stack (root only): display of the
+# generated credentials, Sealed Secrets certificate and key backup, CI/CD
+# kubeconfigs, repository credentials for Argo CD.
 # =============================================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
-# Secrets are stored securely in /root/
-ROOT_SECRETS_DIR="/root/.k3s-secrets"
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+SEALING_KEY_LABEL="sealedsecrets.bitnami.com/sealed-secrets-key"
+SEALING_CONTROLLER="sealed-secrets-controller"
+SEALING_BACKUP_DIR="$BACKUP_DIR/sealed-secrets"
+# Key backups: AES-256-CBC, PBKDF2 key derivation. Passphrase prompted, or read
+# from the SEALING_KEY_PASSPHRASE environment variable (never from arguments).
+OPENSSL_CIPHER=(-aes-256-cbc -pbkdf2 -iter 600000 -md sha256)
 
-# =============================================================================
-# Usage
-# =============================================================================
 usage() {
-    echo "Usage: sudo $0 <command> [options]"
-    echo ""
-    echo "Securely export K3s secrets on-demand."
-    echo ""
-    echo "Commands:"
-    echo "  show                     Display credentials (one-time view)"
-    echo "  show <service>           Display specific service credentials"
-    echo "                           Services: postgres, keycloak, grafana, argocd"
-    echo ""
-    echo "  export-cert <dest>       Export sealed-secrets public cert to <dest>"
-    echo "                           Example: sudo $0 export-cert /tmp/cert.pem"
-    echo ""
-    echo "  export-kubeconfig <app> <env> <dest>"
-    echo "                           Export CI/CD kubeconfig to <dest>"
-    echo "                           Example: sudo $0 export-kubeconfig myapp alpha /tmp/kc.yaml"
-    echo ""
-    echo "  fetch-from-k8s <secret> <namespace>"
-    echo "                           Fetch secret directly from Kubernetes"
-    echo "                           Example: sudo $0 fetch-from-k8s postgresql-secret storage"
-    echo ""
-  echo "  set-scm-credentials      Set SCM credentials for ArgoCD repository access"
-    echo "                           Supports: github, gitlab"
-    echo "                           Example: sudo $0 set-scm-credentials github"
-    echo ""
-    echo "Security notes:"
-    echo "  - Credentials are stored in /root/.k3s-secrets/ (root access only)"
-    echo "  - Exported files should be deleted after use"
-    echo "  - Use 'show' to view without creating files"
-    exit 0
+    printf '%s\n' \
+        "Usage: sudo $0 <command> [arguments]" \
+        "" \
+        "Commands:" \
+        "  show [service]                        generated credentials; service: postgres, keycloak," \
+        "                                        grafana, argocd, or an onboarded application name" \
+        "  export-cert <dest>                    Sealed Secrets public certificate (for kubeseal)" \
+        "  backup-sealing-key [dest]             encrypted backup of the Sealed Secrets private keys" \
+        "                                        (default: ${SEALING_BACKUP_DIR}/sealed-secrets-keys-<date>.enc)" \
+        "  restore-sealing-key <file>            restore keys from a backup, restart the controller" \
+        "  export-kubeconfig <app> <env> <dest>  CI/CD kubeconfig of onboard-app.sh --with-cicd" \
+        "  fetch-from-k8s <secret> <namespace>   decoded content of a Kubernetes Secret" \
+        "  set-scm-credentials <github|gitlab>   repository access for Argo CD (hidden input)" \
+        "" \
+        "Environment: SEALING_KEY_PASSPHRASE  passphrase of the key backups (prompted when unset)"
 }
 
-# =============================================================================
-# Check root
-# =============================================================================
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}Error: This script must be run with sudo${NC}"
-        echo "Usage: sudo $0 <command>"
-        exit 1
-    fi
-}
-
-# =============================================================================
-# Show credentials (display only, no file created)
-# =============================================================================
-show_credentials() {
-    local service="${1:-all}"
-    local secrets_file="${ROOT_SECRETS_DIR}/credentials.env"
-    
-    if [[ ! -f "$secrets_file" ]]; then
-        echo -e "${RED}Error: Credentials file not found at ${secrets_file}${NC}"
-        echo -e "${YELLOW}Run ./vps/install.sh first${NC}"
-        exit 1
-    fi
-    
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}         K3s Credentials (one-time display)                    ${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    
+# -----------------------------------------------------------------------------
+# Credentials
+# -----------------------------------------------------------------------------
+cmd_show() {
+    local service="${1:-all}" file="$SECRETS_DIR/credentials.env" prefix=""
     case "$service" in
-        all)
-            cat "$secrets_file"
-            ;;
-        postgres|postgresql)
-            grep -E "^POSTGRES_" "$secrets_file" || echo "No PostgreSQL credentials found"
-            ;;
-        keycloak)
-            grep -E "^KEYCLOAK_" "$secrets_file" || echo "No Keycloak credentials found"
-            ;;
-        grafana)
-            grep -E "^GRAFANA_" "$secrets_file" || echo "No Grafana credentials found"
-            ;;
-        argocd|argo)
-            grep -E "^ARGOCD_" "$secrets_file" || echo "No ArgoCD credentials found"
-            ;;
-        *)
-            # Check for app-specific secrets
-            local app_file="${ROOT_SECRETS_DIR}/${service}.env"
-            if [[ -f "$app_file" ]]; then
-                cat "$app_file"
-            else
-                echo -e "${RED}Unknown service: $service${NC}"
-                echo "Valid services: postgres, keycloak, grafana, argocd"
-                echo "Or app name if onboarded"
-                exit 1
-            fi
-            ;;
+        all) prefix="" ;;
+        postgres|postgresql) prefix="POSTGRES_" ;;
+        keycloak) prefix="KEYCLOAK_" ;;
+        grafana) prefix="GRAFANA_" ;;
+        argocd|argo) prefix="ARGOCD_" ;;
+        *) file="$SECRETS_DIR/${service}.env" ;;
     esac
-    
-    echo ""
-    echo -e "${YELLOW}⚠️  These credentials are displayed once. Do not share or screenshot.${NC}"
-}
-
-# =============================================================================
-# Export sealed-secrets certificate
-# =============================================================================
-export_cert() {
-    local dest="${1:-}"
-    
-    if [[ -z "$dest" ]]; then
-        echo -e "${RED}Error: Destination path required${NC}"
-        echo "Usage: sudo $0 export-cert /path/to/cert.pem"
-        exit 1
-    fi
-    
-    local cert_file="${ROOT_SECRETS_DIR}/sealed-secrets-pub.pem"
-    
-    # Fetch fresh cert from cluster
-    echo -e "${YELLOW}>>> Fetching certificate from Sealed Secrets controller...${NC}"
-    
-    # Method 1: Try kubeseal if available
-    if command -v kubeseal &>/dev/null; then
-        kubeseal --fetch-cert \
-            --controller-name=sealed-secrets-controller \
-            --controller-namespace=kube-system \
-            > "$cert_file" 2>/dev/null
+    [[ -f "$file" ]] || die "$file not found (unknown service or application)"
+    if [[ -n "$prefix" ]]; then
+        grep -E "^${prefix}" "$file"
     else
-        # Method 2: Extract cert directly from the controller's secret
-        # The secret name starts with 'sealed-secrets-key'
-        local secret_name
-        secret_name=$(kubectl get secrets -n kube-system -l sealedsecrets.bitnami.com/sealed-secrets-key=active -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-        
-        if [[ -z "$secret_name" ]]; then
-            # Fallback: find any sealed-secrets-key secret
-            secret_name=$(kubectl get secrets -n kube-system -o name 2>/dev/null | grep sealed-secrets-key | head -1 | cut -d'/' -f2)
-        fi
-        
-        if [[ -n "$secret_name" ]]; then
-            kubectl get secret -n kube-system "$secret_name" -o jsonpath='{.data.tls\.crt}' | base64 -d > "$cert_file" 2>/dev/null
-        else
-            echo -e "${RED}Error: Could not find Sealed Secrets key${NC}"
-            echo -e "${YELLOW}Make sure sealed-secrets controller is running:${NC}"
-            echo -e "  kubectl get pods -n kube-system | grep sealed"
-            exit 1
-        fi
+        grep -Ev '^\s*(#|$)' "$file"
     fi
-    
-    # Verify cert was fetched
-    if [[ ! -s "$cert_file" ]]; then
-        echo -e "${RED}Error: Certificate file is empty${NC}"
-        exit 1
-    fi
-    
-    # Copy to destination
-    cp "$cert_file" "$dest"
-    
-    # Set ownership to the real user if using sudo
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        chown "$SUDO_USER:$SUDO_USER" "$dest"
-    fi
-    chmod 644 "$dest"  # Public cert can be readable
-    
-    echo -e "${GREEN}✓ Certificate exported to: $dest${NC}"
-    echo ""
-    echo -e "${YELLOW}Usage on local machine:${NC}"
-    echo -e "  scp user@vps:$dest ~/.k3s-secrets/"
-    echo -e "  kubeseal --cert ~/.k3s-secrets/sealed-secrets-pub.pem < secret.yaml"
-    echo ""
-    echo -e "${YELLOW}⚠️  Delete the exported file after copying:${NC}"
-    echo -e "  rm $dest"
+    warn "Do not share or screenshot these values"
 }
 
-# =============================================================================
-# Export kubeconfig for CI/CD
-# =============================================================================
-export_kubeconfig() {
-    local app="${1:-}"
-    local env="${2:-}"
-    local dest="${3:-}"
-    
-    if [[ -z "$app" || -z "$env" || -z "$dest" ]]; then
-        echo -e "${RED}Error: App, environment, and destination required${NC}"
-        echo "Usage: sudo $0 export-kubeconfig <app> <env> /path/to/kubeconfig"
-        exit 1
-    fi
-    
-    local kc_file="${ROOT_SECRETS_DIR}/kubeconfigs/${app}-${env}.kubeconfig"
-    
-    if [[ ! -f "$kc_file" ]]; then
-        echo -e "${RED}Error: Kubeconfig not found: $kc_file${NC}"
-        echo -e "${YELLOW}Run: sudo ./vps/scripts/onboard-app.sh $app${NC}"
-        exit 1
-    fi
-    
-    cp "$kc_file" "$dest"
-    
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        chown "$SUDO_USER:$SUDO_USER" "$dest"
-    fi
-    chmod 600 "$dest"
-    
-    echo -e "${GREEN}✓ Kubeconfig exported to: $dest${NC}"
-    echo ""
-    echo -e "${YELLOW}For GitLab CI, encode as base64:${NC}"
-    echo -e "  base64 -i $dest"
-    echo ""
-    echo -e "${YELLOW}⚠️  Delete after use:${NC}"
-    echo -e "  rm $dest"
-}
-
-# =============================================================================
-# Fetch secret directly from Kubernetes (no file storage)
-# =============================================================================
-fetch_from_k8s() {
-    local secret="${1:-}"
-    local namespace="${2:-}"
-    
-    if [[ -z "$secret" || -z "$namespace" ]]; then
-        echo -e "${RED}Error: Secret name and namespace required${NC}"
-        echo "Usage: sudo $0 fetch-from-k8s <secret-name> <namespace>"
-        exit 1
-    fi
-    
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}Secret: $secret (namespace: $namespace)${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    
-    # Get all keys and decode them
-    local keys
-    keys=$(kubectl get secret "$secret" -n "$namespace" -o jsonpath='{.data}' | jq -r 'keys[]' 2>/dev/null)
-    
-    if [[ -z "$keys" ]]; then
-        echo -e "${RED}Secret not found or empty${NC}"
-        exit 1
-    fi
-    
-    for key in $keys; do
-        local value
-        value=$(kubectl get secret "$secret" -n "$namespace" -o jsonpath="{.data.$key}" | base64 -d 2>/dev/null || echo "[binary data]")
-        echo -e "${GREEN}$key${NC}=$value"
+cmd_fetch_from_k8s() {
+    local secret="${1:-}" namespace="${2:-}" key
+    [[ -n "$secret" && -n "$namespace" ]] || die "usage: $0 fetch-from-k8s <secret> <namespace>"
+    kubectl get secret "$secret" -n "$namespace" >/dev/null || exit 1
+    for key in $(kubectl get secret "$secret" -n "$namespace" -o json | jq -r '.data | keys[]'); do
+        echo -e "${GREEN}${key}${NC}=$(secret_value "$namespace" "$secret" "$key")"
     done
-    
-    echo ""
-    echo -e "${YELLOW}⚠️  Values displayed once. Do not share.${NC}"
 }
 
-# =============================================================================
-# Set SCM credentials for ArgoCD repository access
-# Supports GitHub and GitLab
-# =============================================================================
-set_scm_credentials() {
-    local provider="${1:-}"
-    
-    if [[ -z "$provider" ]]; then
-        echo -e "${RED}Error: Provider required${NC}"
-        echo "Usage: sudo $0 set-scm-credentials <github|gitlab>"
-        exit 1
+cmd_export_kubeconfig() {
+    local app="${1:-}" env="${2:-}" dest="${3:-}" file
+    [[ -n "$app" && -n "$env" && -n "$dest" ]] || die "usage: $0 export-kubeconfig <app> <env> <dest>"
+    file="$SECRETS_DIR/kubeconfigs/${app}-${env}.kubeconfig"
+    [[ -f "$file" ]] || die "$file not found: sudo ./vps/scripts/onboard-app.sh $app --with-cicd"
+    install -m 600 "$file" "$dest"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown "$SUDO_USER" "$dest"
     fi
-    
+    ok "Kubeconfig exported: $dest (delete it after use)"
+}
+
+# -----------------------------------------------------------------------------
+# Sealed Secrets
+# -----------------------------------------------------------------------------
+cmd_export_cert() {
+    local dest="${1:-}"
+    [[ -n "$dest" ]] || die "usage: $0 export-cert <dest>"
+    # The controller seals with its newest active key
+    kubectl get secrets -n kube-system -l "$SEALING_KEY_LABEL=active" \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{.items[-1:].data.tls\.crt}' | base64 -d > "$dest"
+    [[ -s "$dest" ]] || die "no active Sealed Secrets key found"
+    chmod 644 "$dest"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown "$SUDO_USER" "$dest"
+    fi
+    ok "Public certificate exported: $dest"
+    openssl x509 -in "$dest" -noout -fingerprint -sha256
+}
+
+# print_key_fingerprints <keys-json>
+print_key_fingerprints() {
+    local name
+    for name in $(echo "$1" | jq -r '.items[].metadata.name'); do
+        echo "  $name: $(echo "$1" | jq -r --arg name "$name" \
+            '.items[] | select(.metadata.name == $name) | .data["tls.crt"]' \
+            | base64 -d | openssl x509 -noout -fingerprint -sha256 -enddate | tr '\n' ' ')"
+    done
+}
+
+# openssl_passphrase: passphrase option of openssl (environment variable or prompt)
+openssl_passphrase() {
+    if [[ -n "${SEALING_KEY_PASSPHRASE:-}" ]]; then
+        echo "-pass env:SEALING_KEY_PASSPHRASE"
+    fi
+}
+
+cmd_backup_sealing_key() {
+    local dest="${1:-$SEALING_BACKUP_DIR/sealed-secrets-keys-$(date -u +%Y%m%d-%H%M%S).enc}" keys
+    keys=$(kubectl get secrets -n kube-system -l "$SEALING_KEY_LABEL" -o json | jq '{
+        apiVersion: "v1",
+        kind: "List",
+        items: [.items[] | {apiVersion, kind, type, data,
+            metadata: {name: .metadata.name, namespace: .metadata.namespace, labels: .metadata.labels}}]
+    }')
+    [[ "$(echo "$keys" | jq '.items | length')" -gt 0 ]] || die "no Sealed Secrets key found in kube-system"
+
+    step "Backing up the Sealed Secrets keys"
+    print_key_fingerprints "$keys"
+    install -d -m 700 "$(dirname "$dest")"
+    # shellcheck disable=SC2046  # optional "-pass env:..." option
+    printf '%s' "$keys" | openssl enc "${OPENSSL_CIPHER[@]}" -salt $(openssl_passphrase) -out "$dest"
+    chmod 600 "$dest"
+    ok "Encrypted backup: $dest"
+    echo "Copy it off the server and keep the passphrase elsewhere (password manager):"
+    echo "  ssh <vps> \"sudo cat $dest\" > $(basename "$dest")"
+}
+
+cmd_restore_sealing_key() {
+    local file="${1:-}" keys
+    [[ -f "$file" ]] || die "usage: $0 restore-sealing-key <file>"
+    # shellcheck disable=SC2046  # optional "-pass env:..." option
+    keys=$(openssl enc -d "${OPENSSL_CIPHER[@]}" $(openssl_passphrase) -in "$file") \
+        || die "decryption failed (wrong passphrase?)"
+    echo "$keys" | jq -e '.kind == "List" and (.items | length > 0)' >/dev/null 2>&1 \
+        || die "$file is not a Sealed Secrets key backup"
+
+    step "Restoring the Sealed Secrets keys"
+    print_key_fingerprints "$keys"
+    confirm "Restore these keys into kube-system and restart the controller?" || die "aborted"
+    printf '%s' "$keys" | kubectl apply -f -
+    kubectl rollout restart "deployment/$SEALING_CONTROLLER" -n kube-system
+    kubectl rollout status "deployment/$SEALING_CONTROLLER" -n kube-system --timeout=120s
+    ok "Keys restored: SealedSecrets sealed with them are decrypted again"
+}
+
+# -----------------------------------------------------------------------------
+# Argo CD repository access
+# -----------------------------------------------------------------------------
+cmd_set_scm_credentials() {
+    local provider="${1:-}" default_url="" url token username registry
     case "$provider" in
-        github)
-            set_github_credentials
-            ;;
-        gitlab)
-            set_gitlab_credentials
-            ;;
-        *)
-            echo -e "${RED}Error: Unknown provider '$provider'${NC}"
-            echo "Supported providers: github, gitlab"
-            exit 1
-            ;;
+        github) username="git" ;;
+        gitlab) username="oauth2" ;;
+        *) die "usage: $0 set-scm-credentials <github|gitlab>" ;;
     esac
+    if [[ -f "$VPS_CONFIG_FILE" ]]; then
+        load_config
+        default_url="https://${provider}.com/${SCM_ORGANIZATION:-}"
+    fi
+
+    banner "Repository access for Argo CD ($provider)"
+    echo "Token scopes: GitHub 'repo' + 'read:packages' (or fine-grained 'Contents: read'), GitLab 'read_repository'."
+    read -r -p "Organization or group URL [$default_url]: " url
+    url="${url:-$default_url}"
+    [[ -n "$url" ]] || die "the URL cannot be empty"
+    read -r -s -p "Token: " token
+    echo ""
+    [[ -n "$token" ]] || die "the token cannot be empty"
+
+    apply_secret argocd "${provider}-repo-creds" type=git "url=$url" "username=$username" "password=$token"
+    kubectl label secret "${provider}-repo-creds" -n argocd argocd.argoproj.io/secret-type=repo-creds --overwrite >/dev/null
+    # ApplicationSet SCM generator token (templates/argocd/applicationsets.yaml.tpl)
+    apply_secret argocd scm-token "token=$token"
+    ok "${provider}-repo-creds and scm-token created in argocd"
+
+    if [[ "$provider" == "github" ]]; then
+        # Image Updater registry credentials (values/argocd-image-updater.yaml)
+        registry="ghcr.io"
+        apply_registry_secret argocd ghcr-registry-secret "$registry" "$username" "$token"
+        ok "ghcr-registry-secret created in argocd"
+    fi
 }
 
-set_github_credentials() {
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}         Set GitHub Credentials for ArgoCD                      ${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${YELLOW}This creates a repo-creds secret for ArgoCD to access private repos.${NC}"
-    echo -e "${YELLOW}The token needs 'repo' scope (or 'Contents: read' for fine-grained).${NC}"
-    echo ""
-    
-    # Load config.env for default organization
-    local config_file
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    config_file="$(dirname "$script_dir")/config.env"
-    
-    local default_org="your-org"
-    if [[ -f "$config_file" ]]; then
-        source "$config_file"
-        default_org="${SCM_ORGANIZATION:-your-org}"
-    fi
-    
-    # Get GitHub org/user URL
-    echo -n "Enter GitHub org/user URL [https://github.com/${default_org}]: "
-    read -r scm_url
-    scm_url="${scm_url:-https://github.com/${default_org}}"
-    
-    # Read token securely (hidden input)
-    echo -n "Enter GitHub token (ghp_xxx or github_pat_xxx): "
-    read -rs scm_token
-    echo ""
-    
-    if [[ -z "$scm_token" ]]; then
-        echo -e "${RED}Error: Token cannot be empty${NC}"
-        exit 1
-    fi
-    
-    if [[ ! "$scm_token" =~ ^(ghp_|github_pat_) ]]; then
-        echo -e "${YELLOW}Warning: Token doesn't look like a GitHub token${NC}"
-        echo -n "Continue anyway? [y/N]: "
-        read -r confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            echo "Aborted."
-            exit 1
-        fi
-    fi
-    
-    create_repo_creds_secret "github-repo-creds" "$scm_url" "git" "$scm_token"
-    
-    echo -e "${GREEN}✓ GitHub repo credentials configured successfully${NC}"
-    echo -e "${YELLOW}ArgoCD can now access private repos under: $scm_url${NC}"
-}
-
-set_gitlab_credentials() {
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}         Set GitLab Credentials for ArgoCD                      ${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${YELLOW}This creates a repo-creds secret for ArgoCD to access private repos.${NC}"
-    echo -e "${YELLOW}The token needs 'read_repository' scope.${NC}"
-    echo ""
-    
-    # Get GitLab group URL
-    echo -n "Enter GitLab group URL [https://gitlab.com/your-group]: "
-    read -r scm_url
-    
-    if [[ -z "$scm_url" ]]; then
-        echo -e "${RED}Error: GitLab URL required${NC}"
-        exit 1
-    fi
-    
-    # Read token securely (hidden input)
-    echo -n "Enter GitLab token (glpat-xxx): "
-    read -rs scm_token
-    echo ""
-    
-    if [[ -z "$scm_token" ]]; then
-        echo -e "${RED}Error: Token cannot be empty${NC}"
-        exit 1
-    fi
-    
-    if [[ ! "$scm_token" =~ ^glpat- ]]; then
-        echo -e "${YELLOW}Warning: Token doesn't look like a GitLab token${NC}"
-        echo -n "Continue anyway? [y/N]: "
-        read -r confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            echo "Aborted."
-            exit 1
-        fi
-    fi
-    
-    create_repo_creds_secret "gitlab-repo-creds" "$scm_url" "oauth2" "$scm_token"
-    
-    echo -e "${GREEN}✓ GitLab repo credentials configured successfully${NC}"
-    echo -e "${YELLOW}ArgoCD can now access private repos under: $scm_url${NC}"
-}
-
-# Helper function to create repo-creds secret
-create_repo_creds_secret() {
-    local secret_name="$1"
-    local url="$2"
-    local username="$3"
-    local password="$4"
-    
-    # Delete existing secret if present
-    kubectl delete secret "$secret_name" -n argocd 2>/dev/null || true
-    
-    # Create secret with proper structure for ArgoCD repo-creds
-    # See: https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#repository-credentials
-    kubectl create secret generic "$secret_name" -n argocd \
-        --from-literal=type=git \
-        --from-literal=url="$url" \
-        --from-literal=username="$username" \
-        --from-literal=password="$password"
-    
-    # Add required label for ArgoCD to recognize this as repo credentials
-    kubectl label secret "$secret_name" -n argocd \
-        argocd.argoproj.io/secret-type=repo-creds
-
-    # Also create scm-token mirror for ApplicationSet controller (autodiscover)
-    # This is required because ApplicationSet generator uses a separate secret reference
-    echo "Creating scm-token mirror..."
-    kubectl create secret generic scm-token -n argocd \
-        --from-literal=token="$password" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    
-    # Create docker-registry secret for ArgoCD Image Updater (GHCR access)
-    # Image Updater needs this to list tags from private container registries
-    if [[ "$secret_name" == "github-repo-creds" ]]; then
-        echo "Creating GHCR registry secret for Image Updater..."
-        kubectl delete secret ghcr-registry-secret -n argocd 2>/dev/null || true
-        kubectl create secret docker-registry ghcr-registry-secret \
-            --namespace argocd \
-            --docker-server=ghcr.io \
-            --docker-username="$username" \
-            --docker-password="$password"
-        echo -e "${GREEN}✓ ghcr-registry-secret created for Image Updater${NC}"
-    fi
-    
-    # Save token to secrets directory for reuse (e.g., by onboard-app.sh)
-    mkdir -p "$ROOT_SECRETS_DIR"
-    echo "SCM_TOKEN=${password}" > "${ROOT_SECRETS_DIR}/scm-credentials.env"
-    echo "SCM_URL=${url}" >> "${ROOT_SECRETS_DIR}/scm-credentials.env"
-    chmod 600 "${ROOT_SECRETS_DIR}/scm-credentials.env"
-    
-    echo ""
-    echo -e "${GREEN}Token saved to ${ROOT_SECRETS_DIR}/scm-credentials.env${NC}"
-    echo -e "${BLUE}Verify with:${NC}"
-    echo -e "  kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=repo-creds"
-    echo ""
-}
-
-# =============================================================================
-# Main
-# =============================================================================
 main() {
     local command="${1:-}"
-    
+    [[ $# -gt 0 ]] && shift
     case "$command" in
-        show)
-            check_root
-            show_credentials "${2:-all}"
-            ;;
-        export-cert)
-            check_root
-            export_cert "${2:-}"
-            ;;
-        export-kubeconfig)
-            check_root
-            export_kubeconfig "${2:-}" "${3:-}" "${4:-}"
-            ;;
-        fetch-from-k8s|fetch)
-            check_root
-            fetch_from_k8s "${2:-}" "${3:-}"
-            ;;
-        set-scm-credentials)
-            check_root
-            set_scm_credentials "${2:-}"
-            ;;
-        # Legacy alias
-        set-github-token)
-            check_root
-            set_scm_credentials "github"
-            ;;
-        -h|--help|help|"")
-            usage
-            ;;
-        *)
-            echo -e "${RED}Unknown command: $command${NC}"
-            usage
-            ;;
+        show|export-cert|backup-sealing-key|restore-sealing-key|export-kubeconfig|fetch-from-k8s|set-scm-credentials) ;;
+        -h|--help|help|"") usage; exit 0 ;;
+        *) usage; die "unknown command: $command" ;;
+    esac
+    require_root
+    use_k3s_kubeconfig
+
+    case "$command" in
+        show) cmd_show "$@" ;;
+        export-cert) cmd_export_cert "$@" ;;
+        backup-sealing-key) cmd_backup_sealing_key "$@" ;;
+        restore-sealing-key) cmd_restore_sealing_key "$@" ;;
+        export-kubeconfig) cmd_export_kubeconfig "$@" ;;
+        fetch-from-k8s) cmd_fetch_from_k8s "$@" ;;
+        set-scm-credentials) cmd_set_scm_credentials "$@" ;;
     esac
 }
 

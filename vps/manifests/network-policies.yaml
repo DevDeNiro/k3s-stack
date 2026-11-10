@@ -47,6 +47,14 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # Allow from the backup CronJobs of the same namespace (vps/postgres-backup)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres-backup
+      ports:
+        - protocol: TCP
+          port: 5432
   egress:
     # Allow DNS
     - to:
@@ -191,14 +199,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow from nginx-gateway (Gateway API)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: nginx-gateway
-      ports:
-        - protocol: TCP
-          port: 9090
     # Allow from Grafana
     - from:
         - podSelector:
@@ -243,15 +243,9 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  ingress:
-    # Allow from nginx-gateway (Gateway API)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: nginx-gateway
-      ports:
-        - protocol: TCP
-          port: 3000
+  # No ingress: Grafana is reached through kubectl port-forward, which enters the
+  # pod network namespace and is not subject to NetworkPolicies
+  ingress: []
   egress:
     # Allow to Prometheus
     - to:
@@ -297,29 +291,6 @@ spec:
       app.kubernetes.io/name: argocd-server
   policyTypes:
     - Ingress
-  ingress:
-    # Allow from nginx-gateway (Gateway API)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: nginx-gateway
-      ports:
-        - protocol: TCP
-          port: 8080
-
----
-# =============================================================================
-# Default deny for application namespaces
-# Apply this to each app namespace after onboarding
-# =============================================================================
-# Example for myapp-alpha:
-# apiVersion: networking.k8s.io/v1
-# kind: NetworkPolicy
-# metadata:
-#   name: default-deny-all
-#   namespace: myapp-alpha
-# spec:
-#   podSelector: {}
-#   policyTypes:
-#     - Ingress
-#     - Egress
+  # No ingress: the Argo CD UI and CLI go through kubectl port-forward, which
+  # enters the pod network namespace and is not subject to NetworkPolicies
+  ingress: []

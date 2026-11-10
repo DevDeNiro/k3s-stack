@@ -1,3 +1,9 @@
+# =============================================================================
+# k3d cluster "dev-cluster" - local mirror of the VPS K3s server
+# Same K3s flags as vps/config/k3s/config.yaml (audit log excepted). The image
+# (rancher/k3s, K3S_VERSION of vps/config/versions.env) is passed by
+# local/install.sh. Ports are published on 127.0.0.1 only.
+# =============================================================================
 apiVersion: k3d.io/v1alpha5
 kind: Simple
 metadata:
@@ -10,23 +16,14 @@ kubeAPI:
     hostIP: "127.0.0.1"
     hostPort: "6443"
 
-image: rancher/k3s:v1.29.0-k3s1
-
 ports:
-    # Ports for Gateway API (NGINX Gateway Fabric) via k3d LoadBalancer
-    -   port: 80:80
+    # Gateway (NGINX Gateway Fabric hostPorts) through the k3d load balancer
+    -   port: 127.0.0.1:80:80
         nodeFilters:
             - loadbalancer
-    -   port: 443:443
+    -   port: 127.0.0.1:443:443
         nodeFilters:
             - loadbalancer
-    # Direct access NodePorts (optional local tools)
-    -   port: 30432:30432
-        nodeFilters:
-            - server:0
-    -   port: 30379:30379
-        nodeFilters:
-            - server:0
 
 volumes:
     -   volume: k3d-dev-storage:/var/lib/rancher/k3s/storage
@@ -45,6 +42,12 @@ options:
                 nodeFilters:
                     - server:*
             -   arg: --disable=servicelb
+                nodeFilters:
+                    - server:*
+            -   arg: --secrets-encryption=true
+                nodeFilters:
+                    - server:*
+            -   arg: --secrets-encryption-provider=secretbox
                 nodeFilters:
                     - server:*
             -   arg: --tls-san=127.0.0.1

@@ -54,7 +54,6 @@ notifications:
     enabled: false
 
 applicationSet:
-    enabled: true
     resources:
       requests:
         memory: "64Mi"
@@ -65,7 +64,6 @@ applicationSet:
 
 configs:
     cm:
-        helm.enabled: "true"
         statusbadge.enabled: "true"
         timeout.reconciliation: "180s"
         application.resourceTrackingMethod: "annotation"

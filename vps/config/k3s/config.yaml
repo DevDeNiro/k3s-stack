@@ -1,0 +1,32 @@
+# =============================================================================
+# K3s server configuration
+# Installed by vps/install.sh into /etc/rancher/k3s/config.yaml.
+#
+# K3s reads this file at every start and its installer never modifies it: every
+# flag lives here, so upgrades (scripts/k3s-maintenance.sh upgrade) keep them.
+# Never pass flags as installer arguments: they would be lost at the next upgrade.
+# =============================================================================
+write-kubeconfig-mode: "0600"
+
+# NGINX Gateway Fabric (hostPorts 80/443) replaces the bundled ingress controller
+# and load balancer. metrics-server stays enabled (HPA, kubectl top).
+disable:
+  - traefik
+  - servicelb
+
+# Secrets encrypted at rest in the datastore (XSalsa20-Poly1305) from the first
+# start: the encryption key lives in /var/lib/rancher/k3s/server/cred/.
+secrets-encryption: true
+secrets-encryption-provider: secretbox
+
+kubelet-arg:
+  - max-pods=100
+
+kube-apiserver-arg:
+  - enable-admission-plugins=NodeRestriction
+  # Audit log, policy from vps/config/k3s/audit-policy.yaml
+  - audit-policy-file=/var/lib/rancher/k3s/server/audit/policy.yaml
+  - audit-log-path=/var/log/kubernetes/audit/audit.log
+  - audit-log-maxage=7
+  - audit-log-maxbackup=3
+  - audit-log-maxsize=50

@@ -1,249 +1,120 @@
 # Workstation Setup
 
-How to connect a personal workstation (macOS or Windows) to the K3s VPS so you
-can use `kubectl`, `k9s`, `helm` and `stern` without SSHing in for every command.
+How to use `kubectl`, `k9s` and `helm` from a workstation (macOS, Linux, Windows) against
+the VPS. The Kubernetes API (6443) is closed by the VPS firewall: the workstation reaches
+it through an SSH tunnel.
 
 End state:
-- Passwordless SSH to `coterie-vps`
-- Local `~/.kube/config` pointing at the VPS (`https://<VPS_IP>:6443`)
-- `kubectl get nodes` works from your terminal
-- `k9s` opens a TUI dashboard on the live cluster
+- passwordless SSH to the VPS (`ssh k3s-vps`)
+- `~/.kube/config-k3s-vps` pointing at `https://127.0.0.1:16443`, the local end of the tunnel
+- `kubectl get nodes` and `k9s` work from the terminal
 
 ## Prerequisites
 
 | Tool | macOS | Windows |
 |------|-------|---------|
-| `ssh` / `ssh-keygen` | built-in | built-in (OpenSSH on Win10+) |
-| `kubectl` | `brew install kubectl` | bundled with Docker Desktop, or `winget install Kubernetes.kubectl` |
+| `ssh` / `ssh-keygen` | built-in | built-in (OpenSSH) |
+| `kubectl` | `brew install kubectl` | `winget install Kubernetes.kubectl` |
 | `k9s` | `brew install k9s` | `winget install Derailed.k9s` |
 | `helm` (optional) | `brew install helm` | `winget install Helm.Helm` |
-| `stern` (optional, multi-pod log tail) | `brew install stern` | `winget install stern.stern` |
+| `kubeseal` (to seal secrets) | `brew install kubeseal` | release binary |
 
-## Step 1 — SSH key + passwordless access
-
-### 1.a Generate a key (if you don't already have one)
+## Step 1: SSH key and passwordless access
 
 ```bash
-# macOS / Linux
-ssh-keygen -t ed25519 -C "$USER-coterie-vps-$(date +%Y%m%d)" -f ~/.ssh/coterie_vps_ed25519 -N ""
+# Key with a passphrase (stored in the agent / keychain)
+ssh-keygen -t ed25519 -C "$USER-k3s-vps-$(date +%Y%m%d)" -f ~/.ssh/k3s_vps_ed25519
+ssh-copy-id -i ~/.ssh/k3s_vps_ed25519.pub <user>@<vps-ip>
 ```
 
-```powershell
-# Windows / PowerShell
-ssh-keygen -t ed25519 -C "$env:USERNAME-coterie-vps-$(Get-Date -Format yyyyMMdd)" -f "$env:USERPROFILE\.ssh\coterie_vps_ed25519" -N '""'
-```
+On Windows, append the content of the `.pub` file to `~/.ssh/authorized_keys` on the VPS.
 
-### 1.b Install the public key on the VPS (one-time, password required)
-
-```bash
-# macOS / Linux
-cat ~/.ssh/coterie_vps_ed25519.pub | ssh ubuntu@<VPS_IP> \
-    'mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
-     grep -qxF "$(cat)" ~/.ssh/authorized_keys 2>/dev/null || \
-     tee -a ~/.ssh/authorized_keys >/dev/null && \
-     chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED'
-```
-
-```powershell
-# Windows / PowerShell
-$pubkey = (Get-Content "$env:USERPROFILE\.ssh\coterie_vps_ed25519.pub" -Raw).Trim()
-ssh -o StrictHostKeyChecking=accept-new ubuntu@<VPS_IP> `
-    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qxF '$pubkey' ~/.ssh/authorized_keys 2>/dev/null || echo '$pubkey' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED"
-```
-
-### 1.c Add a host alias in `~/.ssh/config`
-
-This lets you type `ssh coterie-vps` instead of the long form.
+## Step 2: SSH host alias with the tunnel
 
 ```text
-# ~/.ssh/config  (macOS, Linux)
-# %USERPROFILE%\.ssh\config  (Windows)
-
-Host coterie-vps
-    HostName <VPS_IP>
-    User ubuntu
-    IdentityFile ~/.ssh/coterie_vps_ed25519
+# ~/.ssh/config
+Host k3s-vps
+    HostName <vps-ip>
+    User <user>
+    IdentityFile ~/.ssh/k3s_vps_ed25519
     IdentitiesOnly yes
     ServerAliveInterval 60
-    ServerAliveCountMax 5
+    # Kubernetes API of the VPS on localhost:16443
+    LocalForward 16443 127.0.0.1:6443
 ```
 
-> Windows note: replace `~/.ssh/coterie_vps_ed25519` with the full path
-> `C:\Users\<you>\.ssh\coterie_vps_ed25519` if the tilde does not expand.
+`ssh k3s-vps` now opens the tunnel with the session; `ssh -fN k3s-vps` opens it in the
+background without a shell.
 
-Test: `ssh coterie-vps "hostname && whoami"` should print `vps-278732ad ubuntu`
-without prompting for a password.
-
-## Step 2 — Local kubeconfig pointing at the VPS
-
-The k3s kubeconfig at `/etc/rancher/k3s/k3s.yaml` references `127.0.0.1:6443`.
-We need to rewrite that to the public IP and save it locally.
-
-### macOS / Linux
+## Step 3: kubeconfig
 
 ```bash
-mkdir -p ~/.kube
-# Backup any existing config
-[ -f ~/.kube/config ] && cp ~/.kube/config ~/.kube/config.backup-$(date +%Y%m%d%H%M%S)
+./vps/scripts/setup-remote.sh <vps-ip> --user <user>
+```
 
-# Fetch, rewrite, save
-ssh coterie-vps "sudo cat /etc/rancher/k3s/k3s.yaml" \
-    | sed 's#127\.0\.0\.1#<VPS_IP>#' \
-    > ~/.kube/config
+The script copies the VPS kubeconfig into `~/.kube/config-k3s-vps` (mode 0600), with the
+context, cluster and user renamed `k3s-vps` and the server set to
+`https://127.0.0.1:16443`, then checks the access through a temporary tunnel. Options:
+`--port` (SSH port), `--local-port` (default 16443), `--context` (default `k3s-vps`),
+`--direct` (no tunnel, only with `harden-host.sh --allow-api-from <your-ip>/32`).
 
-chmod 600 ~/.kube/config
-
-# Test
+```bash
+ssh -fN k3s-vps                        # tunnel in the background
+export KUBECONFIG=~/.kube/config-k3s-vps
 kubectl get nodes
 ```
 
-### Windows / PowerShell
-
-```powershell
-$kubeDir = "$env:USERPROFILE\.kube"
-if (-not (Test-Path $kubeDir)) { New-Item -ItemType Directory -Path $kubeDir | Out-Null }
-$kubeconfigPath = "$kubeDir\config"
-
-if (Test-Path $kubeconfigPath) {
-    Copy-Item $kubeconfigPath "$kubeconfigPath.backup-$(Get-Date -Format yyyyMMddHHmmss)"
-}
-
-$config = (ssh coterie-vps "sudo cat /etc/rancher/k3s/k3s.yaml") -replace '127\.0\.0\.1', '<VPS_IP>'
-[System.IO.File]::WriteAllText(
-    $kubeconfigPath,
-    (($config -join "`n") + "`n"),
-    (New-Object System.Text.UTF8Encoding $false)
-)
-
-# Lock down ACL to current user only
-icacls $kubeconfigPath /inheritance:r /grant:r "${env:USERNAME}:(R,W)" | Out-Null
-
-# Test
-kubectl get nodes
-```
-
-Expected output:
-
-```text
-NAME           STATUS   ROLES                  AGE   VERSION
-vps-278732ad   Ready    control-plane,master   88d   v1.29.0+k3s1
-```
-
-## Step 3 — Launch k9s
+To keep several clusters (for example the local k3d one):
 
 ```bash
-k9s
+export KUBECONFIG=~/.kube/config:~/.kube/config-k3s-vps
+kubectl config use-context k3s-vps
 ```
 
-k9s opens in the `default` namespace which is empty. Useful commands inside:
+## Step 4: k9s
+
+```bash
+k9s --context k3s-vps
+```
 
 | Key / command | Effect |
 |---------------|--------|
-| `0` | Show pods of **all namespaces** (best landing view) |
-| `:ns` | Interactive namespace picker |
-| `:ns coterie-webapp-alpha` | Jump to alpha namespace |
-| `:pods`, `:deploy`, `:svc`, `:rs`, `:httproute` | Switch resource type |
-| `:applications` | View ArgoCD Applications |
-| `:events` | All events sorted by time |
-| `/<text>` | Filter visible list by substring |
-| `l` | Logs of selected pod (`f` toggles follow) |
-| `d` | Describe |
-| `s` | Shell into the container |
-| `Ctrl-D` | Delete the resource |
-| `Shift-R` | Sort by restart count |
-| `Shift-M` | Sort by memory |
-| `?` | Contextual help |
-| `:q` / `Ctrl-C` | Quit |
+| `0` | pods of all namespaces |
+| `:ns` | namespace picker |
+| `:pods`, `:deploy`, `:svc`, `:httproute` | resource type |
+| `:applications` | Argo CD Applications |
+| `:events` | events sorted by time |
+| `/<text>` | filter the list |
+| `l` / `d` / `s` | logs / describe / shell |
+| `Shift-R`, `Shift-M` | sort by restarts, by memory |
+| `:ctx` | switch context |
 
-## Step 4 (optional) — Bash / PowerShell aliases
-
-Add these to your `~/.zshrc` / `~/.bashrc` / `$PROFILE` for fast checks.
-
-### macOS / Linux
+## Step 5: web consoles through port-forward
 
 ```bash
-alias k=kubectl
-alias kgpa='kubectl get pods -A'
-alias kga='kubectl get applications -n argocd'
-alias klf='kubectl logs -f'
-alias kctx='kubectl config use-context'
-alias kn='kubectl config set-context --current --namespace'
+kubectl port-forward -n argocd svc/argocd-server 8080:80          # http://localhost:8080
+kubectl port-forward -n monitoring svc/grafana 3000:80            # http://localhost:3000
+kubectl port-forward -n monitoring svc/prometheus-server 9090:80  # http://localhost:9090
+kubectl port-forward -n security svc/keycloak 8081:80             # http://localhost:8081/admin
 ```
 
-### Windows / PowerShell
-
-```powershell
-function Show-CoterieStatus {
-    Write-Host "=== Cluster ===" -ForegroundColor Cyan
-    kubectl get pods -A | Select-String -NotMatch 'Running|Completed'
-    Write-Host "`n=== ArgoCD apps ===" -ForegroundColor Cyan
-    kubectl get applications -n argocd
-    Write-Host "`n=== Top nodes ===" -ForegroundColor Cyan
-    kubectl top nodes
-}
-Set-Alias k kubectl
-Set-Alias kgpa "kubectl get pods -A"   # static alias variant
-```
-
-## Step 5 (optional) — Multi-cluster
-
-If you later add a second cluster (e.g. local k3d):
-
-```bash
-# macOS / Linux
-export KUBECONFIG=~/.kube/config:~/.kube/k3d-local.config
-kubectl config get-contexts
-kubectl config use-context <name>
-```
-
-```powershell
-# Windows
-$env:KUBECONFIG = "$env:USERPROFILE\.kube\config;$env:USERPROFILE\.kube\k3d-local.config"
-kubectl config get-contexts
-kubectl config use-context <name>
-```
-
-Inside k9s, you can switch with `:ctx`.
+Passwords: `ssh k3s-vps sudo <clone>/vps/scripts/export-secrets.sh show <service>`.
 
 ## Troubleshooting
 
-### `Unable to connect to the server: dial tcp <VPS_IP>:6443: i/o timeout`
-
-The VPS firewall blocks 6443. SSH in and open it:
-
-```bash
-ssh coterie-vps "sudo ufw allow 6443/tcp && sudo ufw reload"
-```
-
-### `error: You must be logged in to the server (Unauthorized)`
-
-The kubeconfig client certificate has expired (rare — k3s renews on its own,
-but if the VPS clock was very wrong it can happen). Re-run Step 2.
-
-### `kubeconfig: ... permission denied` on macOS/Linux
-
-```bash
-chmod 600 ~/.kube/config
-```
-
-### k9s shows `No resources found for v1/pods in "default" namespace`
-
-Normal — your apps live in other namespaces. Press `0` to view all, or
-`:ns coterie-webapp-alpha` to jump to a specific one.
-
-### Want to disable password auth on the VPS now that keys work
-
-```bash
-ssh coterie-vps -t \
-    "sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && \
-     sudo systemctl reload sshd && echo DONE"
-```
+| Symptom | Fix |
+|---------|-----|
+| `connection refused` on `127.0.0.1:16443` | the tunnel is not open: `ssh -fN k3s-vps` |
+| `bind: Address already in use` | a tunnel is already open (`lsof -i :16443`), or choose `--local-port` |
+| `Unauthorized` | kubeconfig of a previous installation: run `setup-remote.sh` again |
+| `x509: certificate is valid for ...` | use the generated kubeconfig: it targets `127.0.0.1`, covered by the K3s certificate |
+| `permission denied` on the kubeconfig | `chmod 600 ~/.kube/config-k3s-vps` |
 
 ## Security checklist
 
-- [ ] SSH key has a passphrase (re-generate without `-N ""` if you skipped it)
-- [ ] Add the key to `ssh-agent` to avoid retyping the passphrase (`ssh-add`)
-- [ ] `~/.kube/config` is mode 600 / Windows ACL restricted to your user
-- [ ] Original VPS password rotated (you used it during the one-time `ssh-copy-id`)
-- [ ] Password authentication disabled on the VPS (Step 5 troubleshooting above)
-- [ ] Backup of `~/.kube/config` not committed to a public repo
+- The SSH key has a passphrase and is loaded in the agent (`ssh-add`).
+- Password logins are disabled on the VPS: `sudo ./vps/scripts/harden-host.sh --apply --harden-ssh`
+  (after a successful key login in a second session).
+- `~/.kube/config-k3s-vps` is mode 0600 and never committed: it grants cluster-admin.
+- Port 6443 stays closed on the VPS; open it to a fixed IP only if a tunnel is not
+  possible (`--allow-api-from`).

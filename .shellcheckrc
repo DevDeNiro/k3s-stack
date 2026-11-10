@@ -1,0 +1,4 @@
+# ShellCheck settings for every script of the repository (make lint)
+# "# shellcheck source=" paths are relative to each script, and sourced files are followed.
+source-path=SCRIPTDIR
+external-sources=true

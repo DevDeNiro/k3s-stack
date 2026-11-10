@@ -1,8 +1,9 @@
 # =============================================================================
 # PostgreSQL Backup Configuration - Production Only
 # =============================================================================
-# Backs up ALL production databases (*-prod) + infrastructure (keycloak)
-# Supports local storage + optional S3 off-site backup
+# Backs up ALL production databases (*-prod) + infrastructure (keycloak) to a
+# PVC on the node. Off-site copies are not handled yet: copy the dumps off the
+# server (see vps/docs/postgres-backup.md).
 # =============================================================================
 
 # =============================================================================
@@ -60,27 +61,15 @@ localStorage:
     mountPath: /backups
 
 # =============================================================================
-# S3 Off-site Backup (optional)
-# =============================================================================
-s3:
-    enabled: false
-    # S3-compatible endpoint (AWS, MinIO, Scaleway, etc.)
-    endpoint: "https://s3.amazonaws.com"
-    bucket: "my-backup-bucket"
-    region: "eu-west-1"
-    # Path prefix in bucket
-    prefix: "k3s-postgres-backups"
-    # Credentials from secret
-    existingSecret: ""
-    accessKeyKey: "access-key"
-    secretKeyKey: "secret-key"
-
-# =============================================================================
 # Container Configuration
 # =============================================================================
+# vps/install.sh adds vps/values/postgresql-image.yaml (registry, repository,
+# digest): the dumps are made with the exact image of the server.
 image:
+    registry: docker.io
     repository: bitnami/postgresql
     tag: "latest"
+    digest: ""
     pullPolicy: IfNotPresent
 
 resources:

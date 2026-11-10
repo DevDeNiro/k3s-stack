@@ -12,7 +12,8 @@ metadata:
         app.kubernetes.io/name: nginx-gateway
         app.kubernetes.io/component: gateway
         app.kubernetes.io/managed-by: k3s-vps
-        # PSA: baseline for gateway controller (needs hostNetwork for ports 80/443)
-        pod-security.kubernetes.io/enforce: baseline
-        pod-security.kubernetes.io/audit: restricted
-        pod-security.kubernetes.io/warn: restricted
+        # PSA: privileged enforcement, the NGINX data plane publishes hostPorts 80/443
+        # (refused by baseline). Audit and warnings keep reporting what exceeds baseline.
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/audit: baseline
+        pod-security.kubernetes.io/warn: baseline

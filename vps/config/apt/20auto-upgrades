@@ -1,0 +1,9 @@
+// =============================================================================
+// Automatic security updates
+// Installed by vps/scripts/harden-host.sh --auto-updates into /etc/apt/apt.conf.d/.
+// Daily package list refresh and unattended upgrades; the allowed origins
+// (security pockets only) come from the distribution's 50unattended-upgrades.
+// No automatic reboot: kernel updates wait for a planned restart.
+// =============================================================================
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";

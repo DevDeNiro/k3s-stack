@@ -26,8 +26,8 @@ spec:
         fsGroup: 1000
       containers:
         - name: keycloak
-          # Official Keycloak LTS image
-          image: quay.io/keycloak/keycloak:26.0
+          # Official image, pinned to an exact patch release (shared with local/install.sh)
+          image: quay.io/keycloak/keycloak:26.8.2
           args:
             - start
             - --hostname-strict=false
@@ -46,7 +46,7 @@ spec:
             - name: KC_DB
               value: postgres
             - name: KC_DB_URL
-              value: jdbc:postgresql://postgresql.storage.svc.cluster.local:5432/keycloak
+              value: jdbc:postgresql://postgresql.storage.svc.cluster.local:5432/keycloak?sslmode=require
             - name: KC_DB_USERNAME
               value: keycloak
             - name: KC_DB_PASSWORD

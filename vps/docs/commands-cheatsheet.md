@@ -145,13 +145,13 @@ sum by (pod) (rate({namespace="coterie-webapp-alpha"} |= "ERROR" [1m]))
 
 ```bash
 # Port-forward Alertmanager UI
-kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:80
+kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:9093
 
 # List active alerts via API
 curl -s http://localhost:9093/api/v2/alerts | jq '.[] | {alertname: .labels.alertname, severity: .labels.severity, namespace: .labels.namespace, pod: .labels.pod, summary: .annotations.summary}'
 
-# Silence an alert (CLI requires amtool)
-amtool silence add alertname=KubePodCrashLooping namespace=coterie-webapp-alpha --duration=1h --comment="investigating"
+# Silence an alert (amtool, through the port-forward)
+amtool --alertmanager.url=http://localhost:9093 silence add alertname=KubePodCrashLooping namespace=coterie-webapp-alpha --duration=1h --comment="investigating"
 ```
 
 ## ArgoCD
@@ -176,25 +176,27 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-repo-server --tail=100
 # Forcer un refresh
 kubectl patch application <name> -n argocd --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
 
-# Mot de passe admin ArgoCD
-kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d
+# Mot de passe admin ArgoCD (généré par setup-secrets.sh)
+sudo ./vps/scripts/export-secrets.sh show argocd
 ```
 
 ## PostgreSQL
 
 ```bash
-# Accès CLI
-kubectl exec -it postgresql-0 -n storage -- psql -U postgres
+# Accès CLI (le mot de passe reste dans le pod : fichier monté par le chart)
+kubectl exec -it -n storage postgresql-0 -c postgresql -- \
+    sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/postgres-password)" exec psql -h 127.0.0.1 -U postgres'
 
 # Exécuter une requête
-kubectl exec -it postgresql-0 -n storage -- psql -U postgres -c "SELECT * FROM pg_stat_activity;"
+kubectl exec -n storage postgresql-0 -c postgresql -- \
+    sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/postgres-password)" exec psql -h 127.0.0.1 -U postgres -c "SELECT * FROM pg_stat_activity;"'
 
 # Port-forward pour connexion locale
 kubectl port-forward -n storage svc/postgresql 5432:5432
 
 # Backups
 kubectl get cronjobs -n storage
-kubectl create job --from=cronjob/postgres-backup manual-backup -n storage
+kubectl create job --from=cronjob/postgres-backup-daily manual-backup -n storage
 ```
 
 ## Sealed Secrets
@@ -293,7 +295,7 @@ alias k='kubectl'
 alias kgp='kubectl get pods'
 alias kgpa='kubectl get pods -A'
 alias kgs='kubectl get svc'
-alias kgi='kubectl get ingress'
+alias kgr='kubectl get httproutes -A'
 alias kga='kubectl get applications -n argocd'
 alias kl='kubectl logs'
 alias klf='kubectl logs -f'
@@ -304,30 +306,36 @@ alias kpf='kubectl port-forward'
 
 ## Scripts k3s-stack
 
+Référence complète des paramètres : [`../README.md`](../README.md).
+
 ```bash
-# Configurer le token SCM (GitHub/GitLab)
+# Accès aux dépôts pour Argo CD (token saisi sans écho)
 sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
-sudo ./vps/scripts/export-secrets.sh set-scm-credentials gitlab
 
 # Voir les credentials
 sudo ./vps/scripts/export-secrets.sh show
-sudo ./vps/scripts/export-secrets.sh show grafana
-sudo ./vps/scripts/export-secrets.sh show keycloak
-sudo ./vps/scripts/export-secrets.sh show argocd
-sudo ./vps/scripts/export-secrets.sh show <app-name>
+sudo ./vps/scripts/export-secrets.sh show <postgres|keycloak|grafana|argocd|app-name>
 
-# Exporter certificat sealed-secrets
-sudo ./vps/scripts/export-secrets.sh export-cert /tmp/cert.pem
+# Certificat public et sauvegarde de la clé Sealed Secrets
+sudo ./vps/scripts/export-secrets.sh export-cert ~/sealed-secrets-pub.pem
+sudo ./vps/scripts/export-secrets.sh backup-sealing-key
 
-# Onboard une nouvelle application
+# Onboarder une application
 sudo ./vps/scripts/onboard-app.sh <app-name>
 
-# Configurer Gateway API
-sudo ./vps/scripts/setup-gateway-api.sh --domain <domain>
+# Gateway, certificats, routes Keycloak (après modification de GATEWAY_HOSTNAMES)
+sudo ./vps/scripts/setup-gateway-api.sh --staging
+sudo ./vps/scripts/setup-gateway-api.sh
 
-# Configurer cert-manager
-sudo ./vps/scripts/setup-cert-manager.sh --email admin@domain.com
-
-# Générer les manifests
+# ApplicationSets et Image Updater (après modification de config.env)
 sudo ./vps/scripts/apply-config.sh
+
+# Pare-feu (aperçu, puis application)
+sudo ./vps/scripts/harden-host.sh
+sudo ./vps/scripts/harden-host.sh --apply
+
+# K3s : état, sauvegarde, mise à jour
+sudo ./vps/scripts/k3s-maintenance.sh status
+sudo ./vps/scripts/k3s-maintenance.sh backup
+sudo ./vps/scripts/k3s-maintenance.sh upgrade
 ```

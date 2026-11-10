@@ -4,7 +4,7 @@ The k3s-stack ships a complete observability stack tuned for a 4-6 GB VPS:
 
 | Component | Role | Memory | Persistent storage |
 |-----------|------|--------|--------------------|
-| Prometheus | Metrics scrape + alerting rules | ~256 Mi | 5 Gi |
+| Prometheus | Metrics scrape + alerting rules | ~320 Mi (limit 768 Mi) | 5 Gi |
 | Alertmanager | Alert routing + grouping | ~64 Mi | 1 Gi |
 | Loki (SingleBinary) | Log aggregation, LogQL queries | ~256 Mi | 5 Gi |
 | Promtail (DaemonSet) | Ships `/var/log/pods/*.log` to Loki | ~128 Mi | - |
@@ -24,7 +24,7 @@ The observability stack is the corrective action: alerts, centralized logs, and 
 |------|----------------|
 | Grafana | `kubectl port-forward -n monitoring svc/grafana 3000:80` then http://localhost:3000 |
 | Prometheus | `kubectl port-forward -n monitoring svc/prometheus-server 9090:80` then http://localhost:9090 |
-| Alertmanager | `kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:80` then http://localhost:9093 |
+| Alertmanager | `kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:9093` then http://localhost:9093 |
 | Loki API | `kubectl port-forward -n monitoring svc/loki 3100:3100` then http://localhost:3100 |
 Credentials are managed via `vps/scripts/export-secrets.sh show grafana`.
 
@@ -68,31 +68,32 @@ Ported from `coterie-webapp/docker/observability/alert_rules.yml`. All metrics c
 - **ConnectionPoolExhausted / ConnectionPoolCritical** — R2DBC pool saturation.
 - **HighJvmMemoryUsage** — heap > 85% for 5m.
 
-To add your own rules, just append entries under the appropriate `groups[].rules` list, then `helm upgrade prometheus prometheus-community/prometheus -n monitoring -f vps/values/prometheus.yaml`.
+To add your own rules, append entries under the appropriate `groups[].rules` list, then apply them with the pinned chart version (see [Notes for VPS upgrades](#notes-for-vps-upgrades)).
 
 ## Configuring Discord notifications (Alertmanager)
 
-The Alertmanager config now ships with a `discord` receiver wired to all `severity=critical|warning` alerts. It reads the webhook URL from a file mounted via `alertmanager.extraSecretMounts` (the Secret is `monitoring/alertmanager-discord-webhook`, key `webhook-url`). Until you create that Secret, Alertmanager will still group and display alerts in its UI, but send attempts will fail silently — it will retry once the Secret appears, no restart required.
+The Alertmanager configuration (`alertmanager.config` in `vps/values/prometheus.yaml`) routes every `severity=critical|warning` alert to a `discord` receiver that uses Alertmanager's native Discord integration (`discord_configs`). The webhook URL is read from a file mounted with `alertmanager.extraSecretMounts` (Secret `monitoring/alertmanager-discord-webhook`, key `webhook-url`). Until the Secret exists, Alertmanager still groups and displays the alerts in its UI; the sends fail and are retried.
 
-### Create / rotate the webhook (one command)
+> Before this configuration, the routing lived under `alertmanagerFiles`, a key the current chart ignores: no alert was ever sent.
+
+### Create / rotate the webhook
 ```bash
 sudo ./vps/scripts/setup-secrets.sh set-discord-webhook
 ```
-The script prompts you for the URL, validates the host, auto-appends `/slack` if missing (Discord rejects Alertmanager's payload format without it), and writes the Secret atomically. Re-running rotates the URL.
+The script prompts for the URL without echo (Discord: Server Settings > Integrations > Webhooks > Copy Webhook URL), checks the host and removes a `/slack` suffix if present (the Slack-compatible endpoint is not used). Re-running rotates the URL.
 
 ### Pick up the new mount
-The Secret is mounted with `optional: true` so Alertmanager doesn't crash if you `helm upgrade` before creating it. Once the Secret exists, kubelet sync will eventually project the file; force it immediately with:
+The Secret is mounted with `optional: true`; the kubelet projects the file once it exists. To apply it immediately:
 ```bash
-kubectl rollout restart deployment/prometheus-alertmanager -n monitoring
+kubectl rollout restart statefulset/prometheus-alertmanager -n monitoring
 ```
 
 ### Verify end-to-end
 ```bash
-# Inject a synthetic alert through alertmanager itself:
-kubectl -n monitoring exec deploy/prometheus-alertmanager -- \
-    amtool alert add 'alertname=DiscordTest' severity=warning
+kubectl exec -n monitoring prometheus-alertmanager-0 -c alertmanager -- \
+    amtool --alertmanager.url=http://localhost:9093 alert add DiscordTest severity=warning
 ```
-Within ~30 s (`group_wait`), a Slack-formatted message should land in your Discord channel. If nothing arrives, check `kubectl -n monitoring logs deploy/prometheus-alertmanager | grep -i discord` — the most common cause is forgetting the `/slack` suffix.
+Within ~30 s (`group_wait`) a message lands in the Discord channel. Otherwise: `kubectl logs -n monitoring prometheus-alertmanager-0 -c alertmanager | grep -i discord`.
 
 ## Application dashboards (shipped by `coterie-webapp` chart)
 
@@ -132,15 +133,25 @@ Use Grafana → Explore → Loki datasource for an interactive UI.
 
 ## Notes for VPS upgrades
 
-When upgrading the stack:
+Chart versions are pinned in `vps/config/versions.env`; `install.sh` applies them. To
+apply a values change on a running installation, use the pinned version:
 
 ```bash
-helm repo update
-helm upgrade prometheus prometheus-community/prometheus -n monitoring -f vps/values/prometheus.yaml
-helm upgrade grafana grafana/grafana -n monitoring -f vps/values/grafana.yaml
-helm upgrade loki grafana/loki -n monitoring -f vps/values/loki.yaml
-helm upgrade promtail grafana/promtail -n monitoring -f vps/values/promtail.yaml
+source vps/config/versions.env
+helm upgrade prometheus prometheus-community/prometheus --version "$PROMETHEUS_CHART_VERSION" -n monitoring -f vps/values/prometheus.yaml
+helm upgrade grafana grafana/grafana --version "$GRAFANA_CHART_VERSION" -n monitoring -f vps/values/grafana.yaml
+helm upgrade loki grafana/loki --version "$LOKI_CHART_VERSION" -n monitoring -f vps/values/loki.yaml
+helm upgrade promtail grafana/promtail --version "$PROMTAIL_CHART_VERSION" -n monitoring -f vps/values/promtail.yaml
 ```
+
+Known items to review (not validated yet):
+- Promtail is end-of-life: migrate the log shipping to Grafana Alloy.
+- The `grafana-policy` NetworkPolicy only allows Grafana to reach Prometheus: add Loki
+  (3100) and Alertmanager (9093) to its egress if those datasources fail. Prometheus
+  egress (`prometheus-policy`) does not list Alertmanager (9093) either: check that alerts
+  reach Alertmanager (`prometheus_notifications_errors_total`).
+- On arm64 servers, the default `prometheus-config-reloader` v0.95.1 image does not exist:
+  reuse the override of `local/values/prometheus.yaml`.
 
 To wipe Loki storage (if schemas conflict after a major version bump):
 ```bash
@@ -181,7 +192,7 @@ kubectl delete pvc -n monitoring -l app.kubernetes.io/name=loki
                    │ │  (PV 1G)     │        │       │
                    │ └─┬────────────┘        │       │
                    │   │                     │       │
-                   │   │ (Discord/Slack)     │       │
+                   │   │ (Discord)           │       │
                    │   ▼                     │       │
                    │   external             ┌┴─────┐ │
                    │                        │      │ │

@@ -5,14 +5,15 @@
 
 # Prometheus Server
 server:
-  # Resource limits
+  # Resource limits: the default scrape jobs (cadvisor, nodes, pods) of a single
+  # node cluster need ~300Mi, more while replaying the WAL at startup
   resources:
     requests:
-      memory: "128Mi"
+      memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "256Mi"
-      cpu: "500m"
+      memory: "768Mi"
+      cpu: "1000m"
 
   # Persistent storage
   persistentVolume:
@@ -31,43 +32,11 @@ server:
     runAsGroup: 65534
     fsGroup: 65534
 
-  # Global scrape configuration
+  # Global scrape configuration. The chart default jobs discover the pods and
+  # Services annotated prometheus.io/scrape (applications, PostgreSQL exporter).
   global:
     scrape_interval: 30s
     evaluation_interval: 30s
-
-  # Extra scrape configs - auto-discover pods with prometheus annotations
-  extraScrapeConfigs: |
-    # Auto-discover application pods with prometheus.io annotations
-    - job_name: 'kubernetes-pods'
-      kubernetes_sd_configs:
-        - role: pod
-      relabel_configs:
-        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
-          action: keep
-          regex: true
-        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
-          action: replace
-          target_label: __metrics_path__
-          regex: (.+)
-        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
-          action: replace
-          target_label: __address__
-          regex: (.+);(.+)
-          replacement: $2:$1
-        - source_labels: [__meta_kubernetes_namespace]
-          action: replace
-          target_label: namespace
-        - source_labels: [__meta_kubernetes_pod_name]
-          action: replace
-          target_label: pod
-    
-    # PostgreSQL Exporter
-    - job_name: 'postgresql'
-      static_configs:
-        - targets: ['postgresql-metrics.storage.svc.cluster.local:9187']
-          labels:
-            service: postgresql
 
 # =============================================================================
 # Alerting rules - delivered via serverFiles so Prometheus picks them up
@@ -359,16 +328,18 @@ serverFiles:
               description: "Heap usage is {{ $value | humanizePercentage }} on {{ $labels.application }} ({{ $labels.namespace }})."
 
 # =============================================================================
-# Alertmanager - lightweight, no receivers configured by default
-# Add Discord/Slack/email webhook in alertmanagerFiles to send notifications.
-# See vps/docs/observability.md for the Discord webhook recipe.
+# Alertmanager (sub-chart prometheus-community/alertmanager)
+# Critical and warning alerts go to Discord through the native integration.
+# The webhook URL is mounted from the Secret monitoring/alertmanager-discord-webhook
+# (key webhook-url, created by scripts/setup-secrets.sh set-discord-webhook) and
+# never appears in the values. Until the Secret exists, the sends fail and the
+# alerts stay visible in the Alertmanager UI.
 # =============================================================================
 alertmanager:
   enabled: true
-  persistentVolume:
+  persistence:
     enabled: true
     size: 1Gi
-    storageClass: ""
   resources:
     requests:
       memory: "32Mi"
@@ -376,37 +347,24 @@ alertmanager:
     limits:
       memory: "64Mi"
       cpu: "50m"
-  securityContext:
-    runAsUser: 65534
-    runAsNonRoot: true
-    runAsGroup: 65534
-    fsGroup: 65534
-  # Mount the Discord webhook URL as a file so it never appears in plaintext in the values.yaml.
-  # The Secret is created by `vps/scripts/setup-secrets.sh set-discord-webhook` (key: webhook-url).
-  # The Alertmanager config below references the file via `url_file:`.
   extraSecretMounts:
     - name: alertmanager-discord-webhook
       mountPath: /etc/alertmanager/secrets/discord
       subPath: ""
       secretName: alertmanager-discord-webhook
       readOnly: true
-      optional: true  # don't crashloop Alertmanager if the secret hasn't been created yet
-
-alertmanagerFiles:
-  alertmanager.yml:
+      optional: true
+  config:
     global:
       resolve_timeout: 5m
     route:
-      # Default: drop everything (acts as a safety net for unrouted alerts).
+      # Unrouted alerts are dropped
       receiver: 'null'
       group_by: ['alertname', 'severity', 'namespace']
       group_wait: 30s
       group_interval: 5m
       repeat_interval: 4h
       routes:
-        # Critical and warning go to Discord. If the secret isn't mounted yet, the
-        # send will fail and Alertmanager will keep retrying without crashing - the
-        # alert still surfaces in the Alertmanager UI.
         - matchers:
             - severity =~ "critical|warning"
           receiver: 'discord'
@@ -414,23 +372,21 @@ alertmanagerFiles:
     receivers:
       - name: 'null'
       - name: 'discord'
-        webhook_configs:
-          # Discord supports Slack-compatible webhook payloads via the `/slack` suffix.
-          # Store ONLY the full URL (incl. /slack) in the Secret under key `webhook-url`.
-          - url_file: /etc/alertmanager/secrets/discord/webhook-url
+        discord_configs:
+          - webhook_url_file: /etc/alertmanager/secrets/discord/webhook-url
             send_resolved: true
-            max_alerts: 0
     inhibit_rules:
       - source_matchers: [ severity="critical" ]
         target_matchers: [ severity="warning" ]
         equal: [ alertname, namespace ]
 
-# Pushgateway (disabled to save resources)
-pushgateway:
+# Pushgateway: not used
+prometheus-pushgateway:
   enabled: false
 
-# Node Exporter (useful for VPS monitoring)
-nodeExporter:
+# Node Exporter: host metrics of the VPS (needs the privileged Pod Security
+# level of the monitoring namespace: hostNetwork, hostPID, hostPath)
+prometheus-node-exporter:
   enabled: true
   resources:
     requests:
@@ -466,6 +422,4 @@ configmapReload:
 # Service accounts
 serviceAccounts:
   server:
-    create: true
-  nodeExporter:
     create: true

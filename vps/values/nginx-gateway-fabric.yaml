@@ -1,5 +1,5 @@
 # =============================================================================
-# NGINX Gateway Fabric Configuration (v2.4.1)
+# NGINX Gateway Fabric Configuration (chart version: config/versions.env)
 # Gateway API implementation using NGINX - optimized for VPS (4-6GB RAM)
 # Docs: https://docs.nginx.com/nginx-gateway-fabric/
 # 
@@ -12,7 +12,6 @@
 # Control Plane (nginx-gateway-fabric controller)
 # -----------------------------------------------------------------------------
 nginxGateway:
-  # Must be 'deployment' in v2.4.1
   kind: deployment
 
   # Gateway class configuration
@@ -90,9 +89,3 @@ nginx:
   service:
     # ClusterIP since we use hostPorts
     type: ClusterIP
-
-  # Tolerations for NGINX pods
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Exists
-      effect: NoSchedule

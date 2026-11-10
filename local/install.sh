@@ -2,340 +2,263 @@
 set -euo pipefail
 
 # =============================================================================
-# K3s Local Cluster Setup on K3d (VPS Mirror Stack)
-# Creates a local Kubernetes environment matching the VPS architecture:
-# - K3s v1.29 mono-node
-# - Gateway API (v1.2.0) with NGINX Gateway Fabric (hostPorts 80/443)
-# - Infrastructure Gateway in nginx-gateway namespace
-# - GitOps with Argo CD in argocd namespace
-# - PostgreSQL in storage namespace (host: postgresql.storage.svc.cluster.local)
-# - Redis in database namespace (host: redis.database.svc.cluster.local)
-# - Sealed Secrets Controller in kube-system namespace
-# - Optional: Keycloak in security namespace, Prometheus/Grafana in monitoring
+# Local mirror of the VPS stack on k3d (macOS or Linux workstation, bash 3.2+)
+#
+# Same K3s release and flags, Gateway API, GitOps, storage and secret
+# controllers as vps/install.sh. Configuration: local/k3d-config.yaml,
+# local/manifests, local/values and the shared vps/ files (Keycloak manifest,
+# SQL, Keycloak route template).
+# Local exceptions: no firewall, no TLS/cert-manager, no audit log; generated
+# passwords are kept in local/*_password.txt (ignored by git).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# shellcheck source=../vps/scripts/lib/common.sh
+source "$SCRIPT_DIR/../vps/scripts/lib/common.sh"
+# Same versions as the VPS
+# shellcheck source=../vps/config/versions.env
+source "$VPS_CONFIG_DIR/versions.env"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+CLUSTER_NAME="dev-cluster"
+LOCAL_AUTH_HOST="auth.localhost"
 
-# Default configurations
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.2.0}"
-NGINX_GATEWAY_FABRIC_VERSION="${NGINX_GATEWAY_FABRIC_VERSION:-2.4.1}"
-INSTALL_GATEWAY_API=true
 INSTALL_POSTGRESQL=true
 INSTALL_REDIS=true
-INSTALL_SEALED_SECRETS=true
 INSTALL_ARGOCD=true
 INSTALL_KEYCLOAK=false
 INSTALL_MONITORING=false
 FORCE_RECREATE=false
-AUTO_YES=false
 
-show_help() {
-    cat <<EOF
-Usage: ./install.sh [OPTIONS]
-
-Options:
-  --minimal             Install Core stack: Gateway API, Postgres, Redis, ArgoCD, Sealed Secrets (Default)
-  --all                 Install everything including Keycloak and Prometheus/Grafana
-  --with-keycloak       Include Keycloak IAM in security namespace (~1GB RAM)
-  --with-monitoring     Include Prometheus and Grafana in monitoring namespace
-  --skip-argocd         Do not install Argo CD
-  --skip-postgres       Do not install PostgreSQL
-  --skip-redis          Do not install Redis
-  --recreate            Force recreation of k3d cluster 'dev-cluster' if it already exists
-  -y, --yes             Non-interactive mode (auto confirm)
-  -h, --help            Show this help message
-
-Examples:
-  ./install.sh                     # Minimal VPS mirror (lightweight, fast)
-  ./install.sh --with-keycloak     # Minimal + Keycloak
-  ./install.sh --all               # Full stack with monitoring
-EOF
-    exit 0
+usage() {
+    printf '%s\n' \
+        "Usage: ./local/install.sh [options]" \
+        "" \
+        "Creates the k3d cluster '${CLUSTER_NAME}' and installs the VPS mirror stack." \
+        "" \
+        "  --minimal          Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets (default)" \
+        "  --all              everything, Keycloak and Prometheus/Grafana included" \
+        "  --with-keycloak    Keycloak in namespace security (~1GB RAM), routed on http://${LOCAL_AUTH_HOST}" \
+        "  --with-monitoring  Prometheus and Grafana in namespace monitoring" \
+        "  --skip-argocd      no Argo CD" \
+        "  --skip-postgres    no PostgreSQL (incompatible with Keycloak)" \
+        "  --skip-redis       no Redis" \
+        "  --recreate         delete and recreate the cluster when it exists" \
+        "  -y, --yes          no confirmation prompt (with --recreate)" \
+        "  -h, --help         this help"
 }
 
-# Parse command line flags
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --minimal)
-            INSTALL_KEYCLOAK=false
-            INSTALL_MONITORING=false
-            shift
-            ;;
-        --all)
-            INSTALL_KEYCLOAK=true
-            INSTALL_MONITORING=true
-            shift
-            ;;
-        --with-keycloak)
-            INSTALL_KEYCLOAK=true
-            shift
-            ;;
-        --with-monitoring)
-            INSTALL_MONITORING=true
-            shift
-            ;;
-        --skip-argocd)
-            INSTALL_ARGOCD=false
-            shift
-            ;;
-        --skip-postgres)
-            INSTALL_POSTGRESQL=false
-            shift
-            ;;
-        --skip-redis)
-            INSTALL_REDIS=false
-            shift
-            ;;
-        --recreate)
-            FORCE_RECREATE=true
-            shift
-            ;;
-        -y|--yes)
-            AUTO_YES=true
-            shift
-            ;;
-        -h|--help)
-            show_help
-            ;;
-        *)
-            echo -e "${RED}Unknown option: $1${NC}"
-            show_help
-            ;;
-    esac
-done
-
-echo -e "${BLUE}=================================================================${NC}"
-echo -e "${BLUE}      K3s Local Cluster Setup (VPS Mirror Stack via K3d)        ${NC}"
-echo -e "${BLUE}=================================================================${NC}"
-
-# Check required commands
-check_command() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        echo -e "${RED}Error: '$1' is not installed or not in PATH.${NC}"
-        return 1
-    else
-        echo -e "${GREEN}✓ $1 found${NC}"
-        return 0
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --minimal) INSTALL_KEYCLOAK=false; INSTALL_MONITORING=false ;;
+            --all) INSTALL_KEYCLOAK=true; INSTALL_MONITORING=true ;;
+            --with-keycloak) INSTALL_KEYCLOAK=true ;;
+            --with-monitoring) INSTALL_MONITORING=true ;;
+            --skip-argocd) INSTALL_ARGOCD=false ;;
+            --skip-postgres) INSTALL_POSTGRESQL=false ;;
+            --skip-redis) INSTALL_REDIS=false ;;
+            --recreate) FORCE_RECREATE=true ;;
+            -y|--yes) ASSUME_YES=true ;;
+            -h|--help) usage; exit 0 ;;
+            *) usage; die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    if [[ "$INSTALL_KEYCLOAK" == "true" && "$INSTALL_POSTGRESQL" != "true" ]]; then
+        die "Keycloak needs PostgreSQL (remove --skip-postgres)"
     fi
+    require_supported_k3s "$K3S_VERSION"
 }
 
-echo -e "\n${YELLOW}>>> Checking prerequisites...${NC}"
-prereqs_ok=true
-for cmd in docker k3d kubectl helm; do
-    if ! check_command "$cmd"; then
-        prereqs_ok=false
+# local_password <file>: password stored in local/<file>, generated on first use
+local_password() {
+    local file="$SCRIPT_DIR/$1"
+    if [[ ! -s "$file" ]]; then
+        (umask 077; generate_password 24 > "$file")
     fi
-done
+    cat "$file"
+}
 
-if [ "$prereqs_ok" = false ]; then
-    echo -e "${RED}Please install missing tools before continuing.${NC}"
-    exit 1
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    echo -e "${RED}Error: Docker daemon is not running. Please start Docker Desktop.${NC}"
-    exit 1
-fi
-
-# 1. K3d Cluster Creation
-echo -e "\n${YELLOW}>>> Setting up k3d cluster 'dev-cluster'...${NC}"
-cluster_exists=false
-if k3d cluster list 2>/dev/null | grep -q "dev-cluster"; then
-    cluster_exists=true
-fi
-
-if [ "$cluster_exists" = true ]; then
-    if [ "$FORCE_RECREATE" = true ]; then
-        echo -e "${YELLOW}Deleting existing 'dev-cluster'...${NC}"
-        k3d cluster delete dev-cluster
-        cluster_exists=false
-    else
-        echo -e "${GREEN}✓ Cluster 'dev-cluster' already exists.${NC}"
-        k3d kubeconfig merge dev-cluster --kubeconfig-switch-context >/dev/null 2>&1 || true
-        kubectl config use-context k3d-dev-cluster >/dev/null 2>&1 || true
+create_cluster() {
+    step "k3d cluster ${CLUSTER_NAME}"
+    if k3d cluster list "$CLUSTER_NAME" >/dev/null 2>&1; then
+        if [[ "$FORCE_RECREATE" == "true" ]]; then
+            confirm "Delete and recreate the cluster ${CLUSTER_NAME}?" || die "aborted"
+            k3d cluster delete "$CLUSTER_NAME"
+        else
+            ok "Cluster ${CLUSTER_NAME} already exists"
+        fi
     fi
-fi
+    if ! k3d cluster list "$CLUSTER_NAME" >/dev/null 2>&1; then
+        # rancher/k3s tags replace the "+" of the K3s release with "-"
+        k3d cluster create --config "$SCRIPT_DIR/k3d-config.yaml" --image "rancher/k3s:${K3S_VERSION//+/-}"
+    fi
+    # Every kubectl/helm call of this script targets the local cluster, whatever KUBECONFIG says
+    KUBECONFIG="$(k3d kubeconfig write "$CLUSTER_NAME")"
+    export KUBECONFIG
+    ok "Connected to $(kubectl config current-context)"
+    local running
+    running=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')
+    [[ "$running" == "$K3S_VERSION" ]] \
+        || warn "the cluster runs K3s ${running}, not ${K3S_VERSION}: --recreate to align it with the VPS"
+}
 
-if [ "$cluster_exists" = false ]; then
-    echo -e "${YELLOW}Creating k3d cluster with k3d-config.yaml...${NC}"
-    k3d cluster create --config "$SCRIPT_DIR/k3d-config.yaml"
-    k3d kubeconfig merge dev-cluster --kubeconfig-switch-context >/dev/null 2>&1 || true
-    kubectl config use-context k3d-dev-cluster >/dev/null 2>&1 || true
-fi
+setup_helm_repos() {
+    step "Helm repositories"
+    local name url
+    while read -r name url; do
+        helm repo add "$name" "$url" --force-update >/dev/null
+    done < <(grep -Ev '^[[:space:]]*(#|$)' "$VPS_CONFIG_DIR/helm-repositories")
+    helm repo update >/dev/null
+}
 
-echo -e "${GREEN}✓ Connected to context: $(kubectl config current-context)${NC}"
-
-# 2. Setup Helm Repositories
-echo -e "\n${YELLOW}>>> Updating Helm repositories...${NC}"
-helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
-helm repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1 || true
-helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets >/dev/null 2>&1 || true
-if [ "$INSTALL_MONITORING" = true ]; then
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
-    helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
-fi
-helm repo update >/dev/null 2>&1
-echo -e "${GREEN}✓ Helm repositories updated${NC}"
-
-# 3. Create Namespaces
-echo -e "\n${YELLOW}>>> Creating namespaces...${NC}"
-kubectl apply -f "$SCRIPT_DIR/manifests/namespaces.yaml"
-echo -e "${GREEN}✓ Namespaces created${NC}"
-
-# 4. Gateway API & NGINX Gateway Fabric
-if [ "$INSTALL_GATEWAY_API" = true ]; then
-    echo -e "\n${YELLOW}>>> Installing Gateway API CRDs (${GATEWAY_API_VERSION})...${NC}"
-    kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-    kubectl wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io --timeout=60s
-    kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
-    kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
-    kubectl wait --for=condition=Established crd/referencegrants.gateway.networking.k8s.io --timeout=60s
-    echo -e "${GREEN}✓ Gateway API CRDs installed${NC}"
-
-    echo -e "${YELLOW}>>> Installing NGINX Gateway Fabric controller (${NGINX_GATEWAY_FABRIC_VERSION})...${NC}"
+# Gateway API CRDs from K3s (gateway-api-crd component), as on the VPS
+install_gateway_api() {
+    step "NGINX Gateway Fabric ${NGINX_GATEWAY_FABRIC_VERSION}"
+    wait_gateway_api_crds
     helm upgrade --install nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
-        --version "${NGINX_GATEWAY_FABRIC_VERSION}" \
+        --version "$NGINX_GATEWAY_FABRIC_VERSION" \
         --namespace nginx-gateway \
         -f "$SCRIPT_DIR/values/nginx-gateway-fabric.yaml" \
         --wait --timeout 5m
-
-    echo -e "${YELLOW}>>> Applying infrastructure-gateway...${NC}"
     kubectl apply -f "$SCRIPT_DIR/manifests/infrastructure-gateway.yaml"
+}
 
-    echo -e "${GREEN}✓ Gateway API & NGINX Gateway Fabric configured${NC}"
-fi
-
-# 5. PostgreSQL in storage namespace
-if [ "$INSTALL_POSTGRESQL" = true ]; then
-    echo -e "\n${YELLOW}>>> Deploying PostgreSQL in 'storage' namespace...${NC}"
-    if [ ! -f "$SCRIPT_DIR/postgres_password.txt" ]; then
-        PG_PASSWORD="localdevpassword123"
-        echo "$PG_PASSWORD" > "$SCRIPT_DIR/postgres_password.txt"
-    else
-        PG_PASSWORD=$(cat "$SCRIPT_DIR/postgres_password.txt")
-    fi
-
+install_postgresql() {
+    [[ "$INSTALL_POSTGRESQL" == "true" ]] || return 0
+    step "PostgreSQL (namespace storage)"
+    local password
+    password=$(local_password postgres_password.txt)
+    apply_secret storage postgresql-secret "postgres-password=$password" "password=$password"
+    # VPS configuration (TLS, pg_hba, tuning), then the local differences
     helm upgrade --install postgresql bitnami/postgresql \
+        --version "$POSTGRESQL_CHART_VERSION" \
         --namespace storage \
-        --set auth.postgresPassword="$PG_PASSWORD" \
-        --set auth.password="$PG_PASSWORD" \
+        -f "$VPS_VALUES_DIR/postgresql.yaml" \
         -f "$SCRIPT_DIR/values/postgresql.yaml" \
+        -f "$VPS_VALUES_DIR/postgresql-image.yaml" \
         --wait --timeout 5m
+    ok "PostgreSQL: postgresql.storage.svc.cluster.local:5432"
+}
 
-    echo -e "${GREEN}✓ PostgreSQL running on postgresql.storage.svc.cluster.local:5432${NC}"
-fi
-
-# 6. Redis in database namespace
-if [ "$INSTALL_REDIS" = true ]; then
-    echo -e "\n${YELLOW}>>> Deploying Redis in 'database' namespace...${NC}"
+install_redis() {
+    [[ "$INSTALL_REDIS" == "true" ]] || return 0
+    step "Redis (namespace database)"
     kubectl apply -f "$SCRIPT_DIR/manifests/redis.yaml"
-    kubectl wait --for=condition=available deployment/redis -n database --timeout=120s
-    echo -e "${GREEN}✓ Redis running on redis.database.svc.cluster.local:6379${NC}"
-fi
+    kubectl wait --for=condition=available deployment/redis -n database --timeout=120s >/dev/null
+}
 
-# 7. Sealed Secrets Controller in kube-system
-if [ "$INSTALL_SEALED_SECRETS" = true ]; then
-    echo -e "\n${YELLOW}>>> Installing Sealed Secrets Controller in kube-system...${NC}"
+install_sealed_secrets() {
+    step "Sealed Secrets controller"
     helm upgrade --install sealed-secrets sealed-secrets/sealed-secrets \
+        --version "$SEALED_SECRETS_CHART_VERSION" \
         --namespace kube-system \
         -f "$SCRIPT_DIR/values/sealed-secrets.yaml" \
         --wait --timeout 3m
-
-    # Export public certificate for sealing secrets locally
-    mkdir -p "$SCRIPT_DIR/secrets"
-    sleep 5
-    SECRET_NAME=$(kubectl get secrets -n kube-system -o name 2>/dev/null | grep sealed-secrets-key | head -1 | cut -d'/' -f2 || true)
-    if [ -n "$SECRET_NAME" ]; then
-        kubectl get secret -n kube-system "$SECRET_NAME" -o jsonpath='{.data.tls\.crt}' | base64 -d > "$SCRIPT_DIR/secrets/sealed-secrets-pub.pem" 2>/dev/null || true
-        echo -e "${GREEN}✓ Sealed Secrets public key saved to local/secrets/sealed-secrets-pub.pem${NC}"
+    local certificate=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        certificate=$(kubectl get secrets -n kube-system -l sealedsecrets.bitnami.com/sealed-secrets-key=active \
+            --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].data.tls\.crt}' 2>/dev/null)
+        [[ -n "$certificate" ]] && break
+        sleep 2
+    done
+    if [[ -n "$certificate" ]]; then
+        mkdir -p "$SCRIPT_DIR/secrets"
+        printf '%s' "$certificate" | base64 -d > "$SCRIPT_DIR/secrets/sealed-secrets-pub.pem"
+        ok "Public certificate: local/secrets/sealed-secrets-pub.pem"
     fi
-    echo -e "${GREEN}✓ Sealed Secrets Controller ready${NC}"
-fi
+}
 
-# 8. Keycloak in security namespace (optional)
-if [ "$INSTALL_KEYCLOAK" = true ]; then
-    echo -e "\n${YELLOW}>>> Deploying Keycloak in 'security' namespace...${NC}"
-    if [ ! -f "$SCRIPT_DIR/keycloak_password.txt" ]; then
-        KC_PASSWORD="adminpassword123"
-        echo "$KC_PASSWORD" > "$SCRIPT_DIR/keycloak_password.txt"
-    else
-        KC_PASSWORD=$(cat "$SCRIPT_DIR/keycloak_password.txt")
-    fi
+install_keycloak() {
+    [[ "$INSTALL_KEYCLOAK" == "true" ]] || return 0
+    step "Keycloak (namespace security)"
+    local db_password parent_refs hostnames
+    db_password=$(local_password postgres_password.txt)
+    apply_secret security keycloak-secret "admin-password=$(local_password keycloak_password.txt)"
+    apply_secret security keycloak-db-secret "password=$db_password"
 
-    kubectl create secret generic keycloak-secret -n security \
-        --from-literal=admin-password="$KC_PASSWORD" \
-        --dry-run=client -o yaml | kubectl apply -f -
+    pg_wait_ready 300s
+    pg_admin_exec "$VPS_SQL_DIR/ensure-role-database.sql" \
+        role=keycloak "password=$db_password" database=keycloak reset_password=true
 
-    kubectl create secret generic keycloak-db-secret -n security \
-        --from-literal=password="$PG_PASSWORD" \
-        --dry-run=client -o yaml | kubectl apply -f -
+    kubectl apply -f "$VPS_MANIFESTS_DIR/keycloak.yaml"
 
-    # Ensure keycloak database exists in PostgreSQL
-    kubectl exec -i -n storage postgresql-0 -- env PGPASSWORD="$PG_PASSWORD" psql -U postgres <<EOF 2>/dev/null || true
-SELECT 'CREATE DATABASE keycloak' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')\gexec
-EOF
+    # Same public routes as the VPS (master realm blocked), on the local HTTP listener
+    parent_refs=$(render_template "$VPS_TEMPLATES_DIR/gateway/listener-ref.yaml.tpl" LISTENER=http)
+    hostnames=$(render_template "$VPS_TEMPLATES_DIR/gateway/hostname-item.yaml.tpl" "HOST=$LOCAL_AUTH_HOST")
+    render_template "$VPS_TEMPLATES_DIR/gateway/keycloak-route.yaml.tpl" \
+        "PARENT_REFS=$parent_refs" "HOSTNAMES=$hostnames" | kubectl apply -f -
 
-    kubectl apply -f "$SCRIPT_DIR/../vps/manifests/keycloak.yaml"
-    echo -e "${GREEN}✓ Keycloak deployed in 'security' namespace${NC}"
-fi
+    kubectl rollout status statefulset/keycloak -n security --timeout=600s >/dev/null \
+        || warn "Keycloak is still starting: kubectl get pods -n security"
+    ok "Keycloak: http://${LOCAL_AUTH_HOST}/realms/<realm> (admin: kubectl port-forward -n security svc/keycloak 8080:80)"
+}
 
-# 9. Argo CD in argocd namespace (GitOps)
-if [ "$INSTALL_ARGOCD" = true ]; then
-    echo -e "\n${YELLOW}>>> Installing Argo CD (GitOps)...${NC}"
+install_argocd() {
+    [[ "$INSTALL_ARGOCD" == "true" ]] || return 0
+    step "Argo CD (namespace argocd)"
     helm upgrade --install argocd argo/argo-cd \
+        --version "$ARGOCD_CHART_VERSION" \
         --namespace argocd \
         -f "$SCRIPT_DIR/values/argocd.yaml" \
         --wait --timeout 5m
-
-    # Retrieve admin password
-    sleep 3
-    ARGO_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" 2>/dev/null | base64 -d || true)
-    if [ -n "$ARGO_PASSWORD" ]; then
-        echo "$ARGO_PASSWORD" > "$SCRIPT_DIR/argocd_password.txt"
-        echo -e "${GREEN}✓ Argo CD initial admin password saved to local/argocd_password.txt${NC}"
+    local password
+    password=$(secret_value argocd argocd-initial-admin-secret password)
+    if [[ -n "$password" ]]; then
+        (umask 077; printf '%s\n' "$password" > "$SCRIPT_DIR/argocd_password.txt")
+        ok "Argo CD admin password: local/argocd_password.txt"
     fi
-    echo -e "${GREEN}✓ Argo CD installed and running${NC}"
-fi
+}
 
-# 10. Monitoring in monitoring namespace (optional)
-if [ "$INSTALL_MONITORING" = true ]; then
-    echo -e "\n${YELLOW}>>> Installing Prometheus & Grafana...${NC}"
+install_monitoring() {
+    [[ "$INSTALL_MONITORING" == "true" ]] || return 0
+    step "Prometheus and Grafana (namespace monitoring)"
     helm upgrade --install prometheus prometheus-community/prometheus \
+        --version "$PROMETHEUS_CHART_VERSION" \
         --namespace monitoring \
-        --set server.resources.requests.memory="128Mi" \
-        --set server.resources.limits.memory="256Mi" \
-        --wait --timeout 3m
-
+        -f "$SCRIPT_DIR/values/prometheus.yaml" \
+        --wait --timeout 5m
     helm upgrade --install grafana grafana/grafana \
+        --version "$GRAFANA_CHART_VERSION" \
         --namespace monitoring \
-        --set adminPassword="admin" \
+        -f "$SCRIPT_DIR/values/grafana.yaml" \
         --wait --timeout 3m
-    echo -e "${GREEN}✓ Monitoring stack installed${NC}"
-fi
+}
 
-# 11. Summary & Instructions
-echo -e "\n${BLUE}=================================================================${NC}"
-echo -e "${GREEN}    Local K3d VPS Mirror Cluster is READY!                      ${NC}"
-echo -e "${BLUE}=================================================================${NC}"
-echo -e "Cluster Context : ${YELLOW}k3d-dev-cluster${NC}"
-echo -e "Gateway API     : ${YELLOW}infrastructure-gateway${NC} (namespace: ${YELLOW}nginx-gateway${NC}, Port: 80/443)"
-echo -e "PostgreSQL      : ${YELLOW}postgresql.storage.svc.cluster.local:5432${NC}"
-echo -e "Redis           : ${YELLOW}redis.database.svc.cluster.local:6379${NC}"
+print_summary() {
+    banner "Local cluster ready"
+    echo "Context     : $(kubectl config current-context) (KUBECONFIG=$KUBECONFIG)"
+    echo "Gateway     : infrastructure-gateway (namespace nginx-gateway), http://localhost"
+    echo "PostgreSQL  : postgresql.storage.svc.cluster.local:5432 (password: local/postgres_password.txt)"
+    echo "Redis       : redis.database.svc.cluster.local:6379"
+    if [[ "$INSTALL_ARGOCD" == "true" ]]; then
+        echo "Argo CD     : kubectl port-forward -n argocd svc/argocd-server 8443:80 -> http://localhost:8443"
+    fi
+    if [[ "$INSTALL_KEYCLOAK" == "true" ]]; then
+        echo "Keycloak    : http://${LOCAL_AUTH_HOST} (admin password: local/keycloak_password.txt)"
+    fi
+    echo ""
+    echo "Reference application: ./local/deploy-app.sh (/etc/hosts: 127.0.0.1 coterie.local)"
+}
 
-if [ "$INSTALL_ARGOCD" = true ]; then
-    echo -e "Argo CD UI      : ${YELLOW}kubectl port-forward -n argocd svc/argocd-server 8443:80${NC} -> http://localhost:8443 (admin / $(cat "$SCRIPT_DIR/argocd_password.txt" 2>/dev/null || echo "see argocd-initial-admin-secret"))"
-fi
+main() {
+    parse_args "$@"
+    banner "k3s-stack - local mirror on k3d"
+    require_commands docker k3d kubectl helm envsubst
+    docker info >/dev/null 2>&1 || die "the Docker daemon is not running"
 
-echo -e "\n${YELLOW}To switch between VPS and Local cluster:${NC}"
-echo -e "  Local : ${GREEN}kubectl config use-context k3d-dev-cluster${NC}"
-echo -e "  VPS   : ${GREEN}kubectl config use-context default${NC}"
+    create_cluster
+    setup_helm_repos
+    step "Namespaces"
+    kubectl apply -f "$SCRIPT_DIR/manifests/namespaces.yaml"
+    install_gateway_api
+    install_postgresql
+    install_redis
+    install_sealed_secrets
+    install_keycloak
+    install_argocd
+    install_monitoring
+    print_summary
+}
 
-echo -e "\n${YELLOW}DNS / Hostname mapping (add to C:\\Windows\\System32\\drivers\\etc\\hosts):${NC}"
-echo -e "  127.0.0.1  coterie.local react-starter-kit.local"
+main "$@"

@@ -13,10 +13,13 @@ Chaque application onboardée via `onboard-app.sh` dispose de :
 
 ### Workflow Git → Environnement
 
-| Branche   | Namespace     | Tag Strategy       |
-|-----------|---------------|--------------------|
-| `develop` | `<app>-alpha` | SHA (`sha-7b3f1a`) |
-| `main`    | `<app>-prod`  | SemVer (`v1.0.0`)  |
+| Branche   | Namespace     | Tag de l'image             |
+|-----------|---------------|----------------------------|
+| `develop` | `<app>-alpha` | `develop-<sha complet>`    |
+| `main`    | `<app>-prod`  | `main-<sha complet>`       |
+
+Le préfixe de branche empêche qu'un build d'une branche soit déployé dans l'autre
+environnement.
 
 ---
 
@@ -30,14 +33,18 @@ ImageUpdater CR → Lit annotations Application → Met à jour image.tag
 
 **Fichiers clés** :
 
-- `manifests/argocd-image-updater-crs.yaml` - CRs pour `*-alpha` et `*-prod`
-- `manifests/argocd-autodiscover.yaml` - ApplicationSets avec annotations
+- `vps/manifests/argocd-image-updaters.yaml` - CRs pour `*-alpha` et `*-prod`
+- `vps/templates/argocd/applicationsets.yaml.tpl` - ApplicationSets et annotations de
+  l'Image Updater (rendus par `scripts/apply-config.sh`)
 
 ### Stratégies
 
-**Alpha** : `newest-build` + filtre `regexp:^([a-f0-9]{7,40}|sha-[a-f0-9]{7,40})$`
+**Alpha** : `newest-build` + filtre `regexp:^develop-[a-f0-9]{40}$`
 
-**Prod** : `newest-build` + filtre `regexp:^(v?[0-9]+\.[0-9]+\.[0-9]+.*|sha-[a-f0-9]{7,40})$`
+**Prod** : `newest-build` + filtre `regexp:^main-[a-f0-9]{40}$`
+
+Le tag retenu est écrit dans l'Application Argo CD (`write-back-method: argocd`), sans
+commit Git.
 
 ---
 
@@ -128,27 +135,30 @@ Une instance Keycloak, un realm par environnement :
 
 ### Créer un realm (CLI)
 
-```bash
-kubectl exec -it -n security deploy/keycloak -- \
-  /opt/keycloak/bin/kcadm.sh config credentials \
-  --server http://localhost:8080 --realm master --user admin \
-  --password "$(kubectl get secret -n security keycloak -o jsonpath='{.data.admin-password}' | base64 -d)"
+Le mot de passe administrateur transite par stdin (jamais en argument de `kubectl exec`,
+enregistré par le journal d'audit) :
 
-kubectl exec -it -n security deploy/keycloak -- \
-  /opt/keycloak/bin/kcadm.sh create realms -s realm=<app>-alpha -s enabled=true
+```bash
+kubectl get secret keycloak-secret -n security -o jsonpath='{.data.admin-password}' | base64 -d \
+  | kubectl exec -i -n security keycloak-0 -- sh -c '
+      IFS= read -r password
+      /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master \
+          --user admin --password "$password" --config /tmp/kcadm.config &&
+      /opt/keycloak/bin/kcadm.sh create realms -s realm="$1" -s enabled=true --config /tmp/kcadm.config
+      rm -f /tmp/kcadm.config' kcadm <app>-alpha
 ```
+
+Le mot de passe initial ne sert qu'au premier démarrage : s'il a été changé dans la
+console, utiliser le mot de passe courant.
 
 ---
 
 ## Firewall (UFW)
 
-```bash
-ufw allow 22/tcp    # SSH
-ufw allow 80/tcp    # HTTP
-ufw allow 443/tcp   # HTTPS
-ufw allow 6443/tcp  # K3s API
-ufw enable
-```
+Configuré par `install.sh` via `scripts/harden-host.sh` : entrées refusées, SSH limité
+en débit, 80/443 ouverts, réseaux de K3s autorisés, **API 6443 fermée** (accès par
+tunnel SSH, voir [`workstation-setup.md`](workstation-setup.md)). Aperçu sans rien
+modifier : `sudo ./vps/scripts/harden-host.sh`.
 
 ---
 
@@ -157,21 +167,20 @@ ufw enable
 ### Mise à jour K3s
 
 ```bash
-curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.30.0+k3s1" sh -
+sudo ./vps/scripts/k3s-maintenance.sh status
+sudo ./vps/scripts/k3s-maintenance.sh upgrade   # sauvegarde, puis mineure suivante
 ```
 
-### Mise à jour Helm Charts
+### Versions des charts
 
-```bash
-helm repo update
-helm upgrade postgresql bitnami/postgresql -n storage -f vps/values/postgresql.yaml
-helm upgrade grafana grafana/grafana -n monitoring -f vps/values/grafana.yaml
-```
+Épinglées dans `vps/config/versions.env`. Une montée de version se valide localement
+(`local/install.sh`) puis s'applique par réinstallation (voir
+[`security-hardening.md`](security-hardening.md)).
 
 ### Backup PostgreSQL manuel
 
 ```bash
-kubectl create job --from=cronjob/postgres-backup manual-backup -n storage
+kubectl create job --from=cronjob/postgres-backup-daily manual-backup -n storage
 kubectl logs -n storage job/manual-backup -f
 ```
 
@@ -181,4 +190,5 @@ kubectl logs -n storage job/manual-backup -f
 sudo ./vps/scripts/setup-secrets.sh rotate
 ```
 
-> ⚠️ Nécessite un restart de tous les services
+Régénère les mots de passe du superutilisateur PostgreSQL, de la base Keycloak et de
+l'administrateur Argo CD, puis redémarre PostgreSQL et Keycloak.

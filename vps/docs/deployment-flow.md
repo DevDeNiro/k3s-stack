@@ -11,8 +11,8 @@ running applications with ArgoCD GitOps.
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
-│  │  ArgoCD     │    │  Keycloak   │    │ PostgreSQL  │    │  Ingress    │  │
-│  │  (GitOps)   │    │  (Auth)     │    │  (Storage)  │    │  (nginx)    │  │
+│  │  ArgoCD     │    │  Keycloak   │    │ PostgreSQL  │    │  Gateway    │  │
+│  │  (GitOps)   │    │  (Auth)     │    │  (Storage)  │    │  (NGF)      │  │
 │  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘    └──────┬──────┘  │
 │         │                  │                  │                  │         │
 │         │    ┌─────────────┴──────────────────┴─────────────┐    │         │
@@ -75,55 +75,62 @@ running applications with ArgoCD GitOps.
 
 **Key files:**
 
-- `vps/install.sh` - Main installation script
-- `vps/values/argocd.yaml` - ArgoCD configuration
-- `vps/values/postgresql.yaml` - PostgreSQL configuration
-- `vps/values/keycloak.yaml` - Keycloak configuration
-- `vps/values/nginx-gateway-fabric.yaml` - Gateway API / NGINX Gateway Fabric configuration
+- `vps/install.sh` - Main installation script (also installs cert-manager and the Let's Encrypt ClusterIssuers)
+- `vps/config/versions.env` - Pinned versions
+- `vps/config/k3s/config.yaml` - K3s flags (secrets encryption, audit log)
+- `vps/values/*.yaml` - Helm values (Argo CD, PostgreSQL, NGINX Gateway Fabric, monitoring)
+- `vps/manifests/keycloak.yaml` - Keycloak
 
-### Phase 2: Ingress & TLS Setup
+### Phase 2: Gateway & TLS Setup
 
-**Script:** `vps/scripts/setup-ingress.sh`
+**Script:** `vps/scripts/setup-gateway-api.sh [--staging] [--no-tls] [--dry-run]`
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                  setup-ingress.sh Execution Flow                 │
+│               setup-gateway-api.sh Execution Flow                │
 └──────────────────────────────────────────────────────────────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Install nginx       │
-                   │  Ingress Controller  │
+                   │ Gateway: HTTP + one  │
+                   │ HTTPS listener per   │
+                   │ GATEWAY_HOSTNAMES    │
                    └──────────┬───────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Install cert-manager│
-                   │  (if --tls flag)     │
+                   │ One Certificate per  │
+                   │ hostname (removed    │
+                   │ hostnames pruned)    │
                    └──────────┬───────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Create ClusterIssuer│
-                   │  (letsencrypt-prod)  │
+                   │ HTTP -> HTTPS        │
+                   │ redirection          │
                    └──────────┬───────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Create Ingress for: │
-                   │  - Keycloak (auth.)  │
-                   │  - (Grafana blocked) │
+                   │ Keycloak routes on   │
+                   │ AUTH_HOSTNAMES       │
+                   └──────────┬───────────┘
+                              │
+                              ▼
+                   ┌──────────────────────┐
+                   │ CoreDNS hairpin:     │
+                   │ pods resolve public  │
+                   │ hostnames internally │
                    └──────────────────────┘
 ```
 
 **Security notes:**
 
-- Grafana/Prometheus: Access via `kubectl port-forward` only
-- Keycloak: Only specific paths are exposed (path-based routing):
-  - `/realms/*` - OAuth/OIDC endpoints
-  - `/resources/*` - Login page assets
-- Keycloak `/admin/*`: NOT routed (access via `kubectl port-forward` only)
-- This approach avoids `server-snippet` annotations which are blocked by nginx-ingress for security
+- Grafana, Prometheus, Alertmanager, Argo CD: `kubectl port-forward` only
+- Keycloak: only `/realms/*` (OAuth/OIDC endpoints) and `/resources/*` (login assets)
+  are routed; the master realm is answered by the gateway, `/admin/*` is not routed
+- Applications attach their own HTTPRoutes to `infrastructure-gateway` (namespace
+  `nginx-gateway`); their hostnames must be listed in `GATEWAY_HOSTNAMES`
 
 ### Phase 3: SCM Credentials (GitHub/GitLab)
 
@@ -142,25 +149,21 @@ running applications with ArgoCD GitOps.
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Create Secret:      │
-                   │  github-repo-creds   │
-                   │  in argocd namespace │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Add Label:          │
-                   │  argocd.argoproj.io/ │
-                   │  secret-type=        │
-                   │  repo-creds          │
+                   │  Secrets in argocd:  │
+                   │  - github-repo-creds │
+                   │    (repo-creds)      │
+                   │  - scm-token         │
+                   │  - ghcr-registry-    │
+                   │    secret            │
                    └──────────────────────┘
 ```
 
-**Important:** This secret allows ArgoCD to pull from private Git repositories.
+**Important:** these Secrets let Argo CD discover and pull the private repositories
+(`github-repo-creds`, `scm-token`) and the Image Updater read GHCR (`ghcr-registry-secret`).
 
 ### Phase 4: Application Onboarding
 
-**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--skip-cicd]`
+**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--skip-database] [--with-cicd]`
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -194,9 +197,9 @@ running applications with ArgoCD GitOps.
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Create CI/CD access │
-                   │  unless --skip-cicd  │
-                   │  (SAs & kubeconfigs) │
+                   │  CI/CD access only   │
+                   │  with --with-cicd    │
+                   │  (SA & kubeconfig)   │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -210,13 +213,13 @@ running applications with ArgoCD GitOps.
 **Outputs:**
 
 - Database credentials in `/root/.k3s-secrets/<app>.env`
-- Kubeconfigs in `/root/.k3s-secrets/kubeconfigs/`
-- Secrets created directly in namespaces (not SealedSecrets)
+- Kubeconfigs in `/root/.k3s-secrets/kubeconfigs/` (with `--with-cicd`)
+- Secrets created directly in namespaces (not SealedSecrets); the URLs of `<app>-db` require TLS
 
-For a production-only GitOps onboarding, target prod explicitly and skip the deployer RBAC/kubeconfigs:
+For a production-only onboarding:
 
 ```bash
-sudo ./vps/scripts/onboard-app.sh coterie-webapp --environment prod --skip-cicd
+sudo ./vps/scripts/onboard-app.sh coterie-webapp --environment prod
 ```
 
 The script preserves a known PostgreSQL password and refuses to rotate an existing account when its password is
@@ -288,11 +291,11 @@ webhook.
 The configured tags are `develop-<full-sha>` for Alpha and `main-<full-sha>` for production; this prevents one branch's
 build from being selected into the other environment.
 
-After changing the ApplicationSet template on an existing VPS, regenerate and apply the manifest:
+After changing the ApplicationSet template (`vps/templates/argocd/applicationsets.yaml.tpl`)
+or `SCM_ORGANIZATION` / `REGISTRY_BASE`, render and apply it again:
 
 ```bash
-./vps/scripts/apply-config.sh
-sudo kubectl apply -f vps/manifests/argocd-autodiscover.yaml
+sudo ./vps/scripts/apply-config.sh
 ```
 
 ```
@@ -331,7 +334,7 @@ sudo kubectl apply -f vps/manifests/argocd-autodiscover.yaml
 │     │  - ServiceAccount                                   │   │
 │     │  - Deployment                                       │   │
 │     │  - Service                                          │   │
-│     │  - Ingress                                          │   │
+│     │  - HTTPRoute                                        │   │
 │     │  - NetworkPolicy                                    │   │
 │     │  - HPA (if enabled)                                 │   │
 │     └─────────────────────────────────────────────────────┘   │
@@ -422,17 +425,11 @@ PreSync).
 
 **Problem:** ArgoCD can't access private GitHub repos.
 
-**Solution:** Create properly labeled secret:
+**Solution:** create the labeled credentials (the token is read without echo and never
+passed as a command argument):
 
 ```bash
-kubectl create secret generic github-repo-creds -n argocd \
-    --from-literal=type=git \
-    --from-literal=url=https://github.com/<org> \
-    --from-literal=username=git \
-    --from-literal=password=<token>
-
-kubectl label secret github-repo-creds -n argocd \
-    argocd.argoproj.io/secret-type=repo-creds
+sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
 ```
 
 ### 4. Sealed Secrets Scope
@@ -451,13 +448,19 @@ metadata:
 
 ### VPS Scripts (`vps/scripts/`)
 
-| Script              | Purpose                      |
-|---------------------|------------------------------|
-| `install.sh`        | Initial cluster setup        |
-| `setup-ingress.sh`  | Ingress & TLS configuration  |
-| `onboard-app.sh`    | Per-application setup        |
-| `export-secrets.sh` | Secure credential management |
-| `setup-secrets.sh`  | Secret rotation              |
+| Script                 | Purpose                                         |
+|------------------------|-------------------------------------------------|
+| `install.sh`           | Initial cluster setup (in `vps/`)               |
+| `setup-gateway-api.sh` | Gateway, certificates, Keycloak routes, hairpin |
+| `apply-config.sh`      | Argo CD ApplicationSets and Image Updater CRs   |
+| `onboard-app.sh`       | Per-application setup                           |
+| `export-secrets.sh`    | Credentials, sealing key backup, SCM access     |
+| `setup-secrets.sh`     | Infrastructure secrets, rotation, Discord       |
+| `harden-host.sh`       | Firewall, SSH and automatic updates             |
+| `k3s-maintenance.sh`   | K3s backups, restores and upgrades              |
+| `setup-remote.sh`      | Workstation kubeconfig through an SSH tunnel    |
+
+Parameters of every script: [`../README.md`](../README.md).
 
 ### Application Helm Chart (`helm/<app>/`)
 
@@ -470,12 +473,13 @@ metadata:
 | `templates/sealed-secrets.yaml`        | Encrypted secrets (not ghcr-secret) |
 | `templates/migration-job-presync.yaml` | Database migrations (optional)      |
 
-### ArgoCD Configuration (`vps/argocd/`)
+### Argo CD Configuration
 
-| File                    | Purpose                         |
-|-------------------------|---------------------------------|
-| `values.yaml`           | ArgoCD Helm values              |
-| `applicationset-*.yaml` | Dynamic app generation from Git |
+| File                                          | Purpose                         |
+|-----------------------------------------------|---------------------------------|
+| `vps/values/argocd.yaml`                      | Argo CD Helm values             |
+| `vps/templates/argocd/applicationsets.yaml.tpl` | Dynamic app generation from Git |
+| `vps/manifests/argocd-image-updaters.yaml`    | Image Updater CRs (alpha, prod) |
 
 ## Quick Reference Commands
 

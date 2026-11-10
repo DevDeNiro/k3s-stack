@@ -40,7 +40,9 @@ metadata:
         app.kubernetes.io/name: monitoring
         app.kubernetes.io/component: infrastructure
         app.kubernetes.io/managed-by: k3s-vps
-        # PSA: baseline for monitoring (node-exporter needs hostNetwork/hostPID)
-        pod-security.kubernetes.io/enforce: baseline
+        # PSA: privileged enforcement, node-exporter (hostNetwork, hostPID, hostPath)
+        # and Promtail (hostPath /var/log/pods) are refused by baseline. Audit and
+        # warnings keep reporting what exceeds baseline.
+        pod-security.kubernetes.io/enforce: privileged
         pod-security.kubernetes.io/audit: baseline
         pod-security.kubernetes.io/warn: baseline

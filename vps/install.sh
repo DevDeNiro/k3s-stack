@@ -2,886 +2,397 @@
 set -euo pipefail
 
 # =============================================================================
-# K3s VPS Installation Script
-# Installs a minimal K3s cluster optimized for 4-6GB RAM VPS
+# k3s-stack - installation on a fresh Ubuntu/Debian VPS
+#
+# Installs K3s and the platform services. Configuration lives in files:
+#   vps/config.env      site settings (copy of config.env.example)
+#   vps/config/         versions, K3s flags, audit policy, Helm repositories
+#   vps/values/         Helm values
+#   vps/manifests/      static manifests
+#   vps/templates/      manifests rendered from config.env
+# Changing a major setting means a reinstallation: uninstall.sh --all, then install.sh.
 # =============================================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-K3D_STACK_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/lib/common.sh
+source "$SCRIPT_DIR/scripts/lib/common.sh"
 
-# Set KUBECONFIG for k3s (required for Helm and kubectl)
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+# Versions: K3S_VERSION, NGINX_GATEWAY_FABRIC_VERSION, <COMPONENT>_VERSION...
+# shellcheck source=config/versions.env
+source "$VPS_CONFIG_DIR/versions.env"
 
-# Configuration
-K3S_VERSION="${K3S_VERSION:-v1.29.0+k3s1}"
+# Host hardening (scripts/harden-host.sh)
+INSTALL_FIREWALL="${INSTALL_FIREWALL:-true}"
+AUTO_UPDATES="${AUTO_UPDATES:-true}"
+ALLOW_API_FROM="${ALLOW_API_FROM:-}"
+
+# Components
+INSTALL_CERT_MANAGER="${INSTALL_CERT_MANAGER:-true}"
+INSTALL_POSTGRESQL="${INSTALL_POSTGRESQL:-true}"
+INSTALL_KEYCLOAK="${INSTALL_KEYCLOAK:-true}"
+INSTALL_REDIS="${INSTALL_REDIS:-true}"
 INSTALL_PROMETHEUS="${INSTALL_PROMETHEUS:-true}"
 INSTALL_GRAFANA="${INSTALL_GRAFANA:-true}"
-INSTALL_KEYCLOAK="${INSTALL_KEYCLOAK:-true}"
-INSTALL_POSTGRESQL="${INSTALL_POSTGRESQL:-true}"
-INSTALL_ARGOCD="${INSTALL_ARGOCD:-true}"
-INSTALL_SEALED_SECRETS="${INSTALL_SEALED_SECRETS:-true}"
-INSTALL_REDIS="${INSTALL_REDIS:-true}"
 INSTALL_LOKI="${INSTALL_LOKI:-true}"
 INSTALL_PROMTAIL="${INSTALL_PROMTAIL:-true}"
+INSTALL_SEALED_SECRETS="${INSTALL_SEALED_SECRETS:-true}"
+INSTALL_ARGOCD="${INSTALL_ARGOCD:-true}"
 INSTALL_NETWORK_POLICIES="${INSTALL_NETWORK_POLICIES:-true}"
-ENABLE_AUDIT_LOGGING="${ENABLE_AUDIT_LOGGING:-true}"
 
-# Gateway API (successor to Ingress)
-# Uses NGINX Gateway Fabric as the controller implementation
-INSTALL_GATEWAY_API="${INSTALL_GATEWAY_API:-true}"
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.2.0}"
-
-echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}         K3s VPS Installation - Minimal Stack                  ${NC}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-
-# -----------------------------------------------------------------------------
-# Pre-flight checks
-# -----------------------------------------------------------------------------
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}Error: This script must be run as root${NC}"
-        exit 1
-    fi
+usage() {
+    printf '%s\n' \
+        "Usage: sudo $0" \
+        "" \
+        "Installs K3s and the platform services on a fresh VPS (see vps/README.md)." \
+        "Requires vps/config.env (cp vps/config.env.example vps/config.env)." \
+        "" \
+        "Environment variables (defaults in brackets):" \
+        "  K3S_VERSION, *_VERSION        versions of vps/config/versions.env [K3s $K3S_VERSION]" \
+        "  INSTALL_FIREWALL              UFW firewall, Kubernetes API closed [true]" \
+        "  AUTO_UPDATES                  unattended security updates [true]" \
+        "  ALLOW_API_FROM                CIDRs allowed on 6443, space-separated [none]" \
+        "  INSTALL_<COMPONENT>           true|false, components: CERT_MANAGER POSTGRESQL KEYCLOAK" \
+        "                                REDIS PROMETHEUS GRAFANA LOKI PROMTAIL SEALED_SECRETS" \
+        "                                ARGOCD NETWORK_POLICIES [true]"
 }
 
+# -----------------------------------------------------------------------------
+# Pre-flight
+# -----------------------------------------------------------------------------
 check_system() {
-    echo -e "\n${YELLOW}>>> Checking system requirements...${NC}"
-    
-    # Check OS
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        echo -e "${GREEN}✓ OS: $NAME $VERSION${NC}"
-    fi
-    
-    # Check RAM
+    step "Checking the system"
+    command -v apt-get >/dev/null 2>&1 || die "an apt-based distribution is required (Ubuntu, Debian)"
+    require_supported_k3s "$K3S_VERSION"
+    # shellcheck source=/dev/null
+    ok "OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
+
+    local total_ram
     total_ram=$(free -m | awk '/^Mem:/{print $2}')
-    echo -e "${GREEN}✓ RAM: ${total_ram}MB${NC}"
-    
+    ok "RAM: ${total_ram}MB, disk free: $(df -h / | awk 'NR==2 {print $4}')"
     if [[ $total_ram -lt 3500 ]]; then
-        echo -e "${RED}Warning: Less than 4GB RAM detected. Some services may not start.${NC}"
+        warn "Less than 4GB RAM: some services may not start"
     fi
-    
-    # Check disk space
-    disk_free=$(df -h / | awk 'NR==2 {print $4}')
-    echo -e "${GREEN}✓ Disk free: $disk_free${NC}"
+
+    if [[ "$INSTALL_KEYCLOAK" == "true" && "$INSTALL_POSTGRESQL" != "true" ]]; then
+        die "Keycloak needs PostgreSQL (INSTALL_POSTGRESQL=true)"
+    fi
 }
 
-# -----------------------------------------------------------------------------
-# Install dependencies
-# -----------------------------------------------------------------------------
 install_dependencies() {
-    echo -e "\n${YELLOW}>>> Installing dependencies...${NC}"
-    
+    step "Installing dependencies"
     apt-get update -qq
-    apt-get install -y -qq curl wget git jq openssl apt-transport-https ca-certificates
-    
-    echo -e "${GREEN}✓ Dependencies installed${NC}"
+    # gettext-base: envsubst (templates), apache2-utils: htpasswd (Argo CD password hash),
+    # iptables before K3s: K3s, flannel and UFW must write to the same iptables backend
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        curl git jq openssl ca-certificates gettext-base apache2-utils iptables
+    ok "Dependencies installed"
 }
 
 # -----------------------------------------------------------------------------
-# Setup audit logging
-# -----------------------------------------------------------------------------
-setup_audit_logging() {
-    if [[ "$ENABLE_AUDIT_LOGGING" != "true" ]]; then
-        return 0
-    fi
-    
-    echo -e "${YELLOW}>>> Configuring audit logging...${NC}"
-    
-    # Create audit config directory
-    mkdir -p /var/lib/rancher/k3s/server/audit
-    
-    # Copy audit policy
-    if [[ -f "$SCRIPT_DIR/manifests/audit-policy.yaml" ]]; then
-        cp "$SCRIPT_DIR/manifests/audit-policy.yaml" /var/lib/rancher/k3s/server/audit/policy.yaml
-        echo -e "${GREEN}✓ Audit policy installed${NC}"
-    else
-        echo -e "${YELLOW}⚠ audit-policy.yaml not found, using default policy${NC}"
-        cat > /var/lib/rancher/k3s/server/audit/policy.yaml <<'EOF'
-apiVersion: audit.k8s.io/v1
-kind: Policy
-rules:
-  - level: Metadata
-    resources:
-      - group: ""
-        resources: ["secrets"]
-  - level: Metadata
-EOF
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Install K3s
+# K3s and host
 # -----------------------------------------------------------------------------
 install_k3s() {
-    echo -e "\n${YELLOW}>>> Installing K3s ${K3S_VERSION}...${NC}"
-    
-    if command -v k3s &> /dev/null; then
-        echo -e "${GREEN}✓ K3s already installed${NC}"
+    step "Installing K3s ${K3S_VERSION}"
+    if command -v k3s >/dev/null 2>&1; then
+        ok "K3s already installed: $(k3s --version | head -1)"
+        warn "Its configuration is not changed: reinstall (uninstall.sh --all) to apply config/k3s/"
         return 0
     fi
-    
-    # Setup audit logging before K3s installation
-    setup_audit_logging
-    
-    # Build K3s install arguments
-    # Note: metrics-server is ENABLED for HPA (Horizontal Pod Autoscaler) support
-    local k3s_args="--disable traefik --disable servicelb"
-    k3s_args="$k3s_args --write-kubeconfig-mode 600"
-    k3s_args="$k3s_args --kube-apiserver-arg=enable-admission-plugins=NodeRestriction"
-    k3s_args="$k3s_args --kubelet-arg=max-pods=100"
-    
-    # Add audit logging arguments if enabled
-    if [[ "$ENABLE_AUDIT_LOGGING" == "true" ]]; then
-        k3s_args="$k3s_args --kube-apiserver-arg=audit-policy-file=/var/lib/rancher/k3s/server/audit/policy.yaml"
-        k3s_args="$k3s_args --kube-apiserver-arg=audit-log-path=/var/log/kubernetes/audit/audit.log"
-        k3s_args="$k3s_args --kube-apiserver-arg=audit-log-maxage=7"
-        k3s_args="$k3s_args --kube-apiserver-arg=audit-log-maxbackup=3"
-        k3s_args="$k3s_args --kube-apiserver-arg=audit-log-maxsize=50"
-        mkdir -p /var/log/kubernetes/audit
-    fi
-    
-    # Install K3s with minimal footprint
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" sh -s - $k3s_args
-    
-    # Wait for K3s to be ready
-    echo -e "${YELLOW}Waiting for K3s to be ready...${NC}"
-    sleep 10
-    
-    until kubectl get nodes &> /dev/null; do
-        echo "Waiting for K3s API..."
+
+    install -D -m 600 "$VPS_CONFIG_DIR/k3s/config.yaml" /etc/rancher/k3s/config.yaml
+    install -D -m 600 "$VPS_CONFIG_DIR/k3s/audit-policy.yaml" /var/lib/rancher/k3s/server/audit/policy.yaml
+    install -d -m 700 /var/log/kubernetes/audit
+
+    # No installer argument: every flag lives in /etc/rancher/k3s/config.yaml
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" sh -
+
+    until kubectl get nodes >/dev/null 2>&1; do
         sleep 5
     done
-    
-    kubectl wait --for=condition=Ready node --all --timeout=120s
-    
-    echo -e "${GREEN}✓ K3s installed and running${NC}"
+    kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null
+    ok "K3s running, secrets encrypted at rest"
 }
 
-# -----------------------------------------------------------------------------
-# Install Helm
-# -----------------------------------------------------------------------------
+harden_host() {
+    if [[ "$INSTALL_FIREWALL" != "true" ]]; then
+        warn "Skipping host hardening (INSTALL_FIREWALL=false)"
+        return 0
+    fi
+    local args=(--apply --yes) cidr
+    if [[ "$AUTO_UPDATES" == "true" ]]; then
+        args+=(--auto-updates)
+    fi
+    for cidr in $ALLOW_API_FROM; do
+        args+=(--allow-api-from "$cidr")
+    done
+    bash "$SCRIPT_DIR/scripts/harden-host.sh" "${args[@]}"
+}
+
 install_helm() {
-    echo -e "\n${YELLOW}>>> Installing Helm...${NC}"
-    
-    if command -v helm &> /dev/null; then
-        echo -e "${GREEN}✓ Helm already installed${NC}"
+    step "Installing Helm"
+    if command -v helm >/dev/null 2>&1; then
+        ok "Helm already installed: $(helm version --short)"
         return 0
     fi
-    
     curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-    
-    echo -e "${GREEN}✓ Helm installed${NC}"
 }
 
-# -----------------------------------------------------------------------------
-# Setup Helm repositories
-# -----------------------------------------------------------------------------
 setup_helm_repos() {
-    echo -e "\n${YELLOW}>>> Setting up Helm repositories...${NC}"
-    
-    helm repo add bitnami https://charts.bitnami.com/bitnami
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-    helm repo add grafana https://grafana.github.io/helm-charts
-    helm repo add argo https://argoproj.github.io/argo-helm
-    helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
-    
-    # Note: NGINX Gateway Fabric uses OCI registry (oci://ghcr.io/nginx/charts/nginx-gateway-fabric)
-    # No need to add a traditional Helm repo for it
-    
-    helm repo update
-    
-    echo -e "${GREEN}✓ Helm repositories configured${NC}"
+    step "Configuring Helm repositories"
+    local name url
+    while read -r name url; do
+        helm repo add "$name" "$url" --force-update >/dev/null
+    done < <(grep -Ev '^\s*(#|$)' "$VPS_CONFIG_DIR/helm-repositories")
+    helm repo update >/dev/null
+    ok "Helm repositories ready"
 }
 
-# -----------------------------------------------------------------------------
-# Create namespaces
-# -----------------------------------------------------------------------------
 create_namespaces() {
-    echo -e "\n${YELLOW}>>> Creating namespaces...${NC}"
-    
-    kubectl apply -f "$SCRIPT_DIR/namespaces/"
-    
-    echo -e "${GREEN}✓ Namespaces created${NC}"
+    step "Creating infrastructure namespaces"
+    kubectl apply -f "$VPS_NAMESPACES_DIR/"
+}
+
+setup_secrets() {
+    bash "$SCRIPT_DIR/scripts/setup-secrets.sh" setup
 }
 
 # -----------------------------------------------------------------------------
-# Install Gateway API (using NGINX Gateway Fabric)
-# Uses NGINX Gateway Fabric as the controller implementation
+# Traffic and certificates
 # -----------------------------------------------------------------------------
+# The Gateway API CRDs come with K3s (gateway-api-crd component). The NGF chart
+# creates the "nginx" GatewayClass and its NginxProxy parameters (hostPorts
+# 80/443). The Gateway itself comes from setup-gateway-api.sh.
 install_gateway_api() {
-    if [[ "$INSTALL_GATEWAY_API" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Gateway API (INSTALL_GATEWAY_API=false)${NC}"
+    step "Installing NGINX Gateway Fabric ${NGINX_GATEWAY_FABRIC_VERSION}"
+    wait_gateway_api_crds
+    helm upgrade --install nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+        --version "$NGINX_GATEWAY_FABRIC_VERSION" \
+        --namespace nginx-gateway \
+        -f "$VPS_VALUES_DIR/nginx-gateway-fabric.yaml" \
+        --wait --timeout 5m
+    ok "NGINX Gateway Fabric ready (GatewayClass nginx)"
+}
+
+install_cert_manager() {
+    if [[ "$INSTALL_CERT_MANAGER" != "true" ]]; then
+        warn "Skipping cert-manager (INSTALL_CERT_MANAGER=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing Gateway API...${NC}"
-    
-    # Step 1: Install Gateway API CRDs (Standard channel)
-    echo -e "${YELLOW}Installing Gateway API CRDs (${GATEWAY_API_VERSION})...${NC}"
-    kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-    
-    # Wait for CRDs to be established
-    echo -e "${YELLOW}Waiting for Gateway API CRDs to be established...${NC}"
-    kubectl wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io --timeout=60s
-    kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
-    kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
-    kubectl wait --for=condition=Established crd/referencegrants.gateway.networking.k8s.io --timeout=60s
-    
-    echo -e "${GREEN}✓ Gateway API CRDs installed${NC}"
-    
-    # Step 2: Create nginx-gateway namespace (if not already created via namespaces/)
-    kubectl create namespace nginx-gateway --dry-run=client -o yaml | kubectl apply -f -
-    
-    # Step 3: Install NGINX Gateway Fabric (from OCI registry)
-    echo -e "${YELLOW}Installing NGINX Gateway Fabric...${NC}"
-    helm upgrade --install nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
-        --namespace nginx-gateway \
-        -f "$SCRIPT_DIR/values/nginx-gateway-fabric.yaml" \
+    step "Installing cert-manager ${CERT_MANAGER_VERSION}"
+    helm upgrade --install cert-manager jetstack/cert-manager \
+        --version "$CERT_MANAGER_VERSION" \
+        --namespace cert-manager \
+        -f "$VPS_VALUES_DIR/cert-manager.yaml" \
         --wait --timeout 5m
-    
-    # Step 4: Create GatewayClass
-    echo -e "${YELLOW}Creating GatewayClass...${NC}"
-    kubectl apply -f "$SCRIPT_DIR/manifests/gatewayclass.yaml"
-    
-    # Wait for NGINX Gateway Fabric to be ready
-    echo -e "${YELLOW}Waiting for NGINX Gateway Fabric to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=nginx-gateway-fabric \
-        -n nginx-gateway --timeout=300s || true
-    
-    echo -e "${GREEN}✓ Gateway API installed (NGINX Gateway Fabric)${NC}"
-    echo -e "${YELLOW}  Next: Create a Gateway resource with setup-gateway-api.sh${NC}"
+
+    # The webhook serves its certificate a few seconds after the rollout
+    local issuers
+    issuers=$(render_template "$VPS_TEMPLATES_DIR/cert-manager/cluster-issuers.yaml.tpl" LETSENCRYPT_EMAIL)
+    for _ in $(seq 1 11); do
+        if printf '%s\n' "$issuers" | kubectl apply -f - >/dev/null 2>&1; then
+            ok "ClusterIssuers letsencrypt-staging and letsencrypt-prod ready"
+            return 0
+        fi
+        sleep 5
+    done
+    printf '%s\n' "$issuers" | kubectl apply -f -
 }
 
 # -----------------------------------------------------------------------------
-# Install PostgreSQL
+# Data and identity
 # -----------------------------------------------------------------------------
 install_postgresql() {
     if [[ "$INSTALL_POSTGRESQL" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping PostgreSQL (INSTALL_POSTGRESQL=false)${NC}"
+        warn "Skipping PostgreSQL (INSTALL_POSTGRESQL=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing PostgreSQL...${NC}"
-    
-    kubectl create namespace storage --dry-run=client -o yaml | kubectl apply -f -
-    
+    step "Installing PostgreSQL"
     helm upgrade --install postgresql bitnami/postgresql \
+        --version "$POSTGRESQL_CHART_VERSION" \
         --namespace storage \
-        -f "$SCRIPT_DIR/values/postgresql.yaml" \
+        -f "$VPS_VALUES_DIR/postgresql.yaml" \
+        -f "$VPS_VALUES_DIR/postgresql-image.yaml" \
         --wait --timeout 5m
-    
-    echo -e "${GREEN}✓ PostgreSQL installed${NC}"
+    ok "PostgreSQL running: postgresql.storage.svc.cluster.local:5432"
 }
 
-# -----------------------------------------------------------------------------
-# Create Keycloak database in PostgreSQL
-# Must be called AFTER PostgreSQL is installed and running
-# -----------------------------------------------------------------------------
 create_keycloak_database() {
-    if [[ "$INSTALL_KEYCLOAK" != "true" || "$INSTALL_POSTGRESQL" != "true" ]]; then
+    if [[ "$INSTALL_KEYCLOAK" != "true" ]]; then
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Creating Keycloak database in PostgreSQL...${NC}"
-    
-    # Wait for PostgreSQL to be ready
-    echo -e "${YELLOW}Waiting for PostgreSQL to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql \
-        -n storage --timeout=120s
-    
-    # Get passwords from secrets
-    local pg_admin_pass
-    pg_admin_pass=$(kubectl get secret -n storage postgresql-secret -o jsonpath="{.data.postgres-password}" | base64 -d)
-    
-    local kc_db_pass
-    kc_db_pass=$(kubectl get secret -n security keycloak-db-secret -o jsonpath="{.data.password}" | base64 -d)
-    
-    # Create keycloak user and database using -i flag for proper stdin handling
-    kubectl exec -i -n storage postgresql-0 -- env PGPASSWORD="${pg_admin_pass}" psql -U postgres <<EOSQL 2>/dev/null
--- Create keycloak user if not exists
-DO \$\$
-BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak') THEN
-        CREATE USER keycloak WITH PASSWORD '${kc_db_pass}';
-    ELSE
-        ALTER USER keycloak WITH PASSWORD '${kc_db_pass}';
-    END IF;
-END
-\$\$;
-
--- Create keycloak database if not exists
-SELECT 'CREATE DATABASE keycloak OWNER keycloak'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')\gexec
-
--- Grant privileges
-GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;
-EOSQL
-    
-    echo -e "${GREEN}✓ Keycloak database created${NC}"
+    step "Creating the Keycloak database"
+    pg_wait_ready 300s
+    local password
+    password=$(secret_value security keycloak-db-secret password)
+    [[ -n "$password" ]] || die "secret security/keycloak-db-secret not found"
+    pg_admin_exec "$VPS_SQL_DIR/ensure-role-database.sql" \
+        role=keycloak "password=$password" database=keycloak reset_password=true
+    ok "Database keycloak ready"
 }
 
-# -----------------------------------------------------------------------------
-# Install Keycloak (using official image from quay.io)
-# -----------------------------------------------------------------------------
 install_keycloak() {
     if [[ "$INSTALL_KEYCLOAK" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Keycloak (INSTALL_KEYCLOAK=false)${NC}"
+        warn "Skipping Keycloak (INSTALL_KEYCLOAK=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing Keycloak (official image)...${NC}"
-    
-    kubectl create namespace security --dry-run=client -o yaml | kubectl apply -f -
-    
-    # Use official Keycloak manifest (not Bitnami chart due to image restrictions)
-    kubectl apply -f "$SCRIPT_DIR/manifests/keycloak.yaml"
-    
-    # Wait for Keycloak to be ready (can take a few minutes)
-    echo -e "${YELLOW}Waiting for Keycloak to start (this may take 2-5 minutes)...${NC}"
-    kubectl wait --for=condition=ready pod -l app=keycloak \
-        -n security --timeout=600s || true
-    
-    echo -e "${GREEN}✓ Keycloak installed${NC}"
+    step "Installing Keycloak"
+    kubectl apply -f "$VPS_MANIFESTS_DIR/keycloak.yaml"
+    kubectl rollout status statefulset/keycloak -n security --timeout=600s \
+        || warn "Keycloak is still starting: kubectl get pods -n security"
 }
 
-# -----------------------------------------------------------------------------
-# Configure CoreDNS for internal hostname resolution (hairpin NAT fix)
-# This allows pods to reach services via their external hostnames
-# -----------------------------------------------------------------------------
-configure_coredns_internal_hosts() {
-    echo -e "\n${YELLOW}>>> Configuring CoreDNS internal host resolution...${NC}"
-    
-    # Load domain from config
-    local config_file="$SCRIPT_DIR/config.env"
-    if [[ ! -f "$config_file" ]]; then
-        echo -e "${YELLOW}⚠ config.env not found, skipping CoreDNS configuration${NC}"
-        return 0
-    fi
-    source "$config_file"
-    
-    if [[ -z "${DOMAIN:-}" ]]; then
-        echo -e "${YELLOW}⚠ DOMAIN not set in config.env, skipping CoreDNS configuration${NC}"
-        return 0
-    fi
-    
-    # Get Keycloak ClusterIP (if installed)
-    local keycloak_ip
-    keycloak_ip=$(kubectl get svc keycloak -n security -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
-    
-    if [[ -z "$keycloak_ip" ]]; then
-        echo -e "${YELLOW}⚠ Keycloak service not found, skipping CoreDNS hosts entry${NC}"
-        return 0
-    fi
-    
-    # Check if entry already exists in NodeHosts
-    local current_hosts
-    current_hosts=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.NodeHosts}' 2>/dev/null || echo "")
-    
-    local auth_hostname="auth.${DOMAIN}"
-    
-    if echo "$current_hosts" | grep -q "$auth_hostname"; then
-        echo -e "${GREEN}✓ CoreDNS already configured for ${auth_hostname}${NC}"
-        return 0
-    fi
-    
-    # Add entry to NodeHosts
-    echo -e "${YELLOW}Adding ${auth_hostname} → ${keycloak_ip} to CoreDNS...${NC}"
-    
-    # Create temporary file with new hosts content
-    local tmp_file
-    tmp_file=$(mktemp)
-    
-    # Write current hosts + new entry
-    echo "${current_hosts}" > "$tmp_file"
-    echo "${keycloak_ip} ${auth_hostname}" >> "$tmp_file"
-    
-    # Read back as single string (preserves newlines properly)
-    local new_hosts_content
-    new_hosts_content=$(cat "$tmp_file")
-    rm -f "$tmp_file"
-    
-    # Create patch file
-    local patch_file
-    patch_file=$(mktemp)
-    cat > "$patch_file" <<EOF
-data:
-  NodeHosts: |
-$(echo "$new_hosts_content" | sed 's/^/    /')
-EOF
-    
-    # Apply patch
-    kubectl patch configmap coredns -n kube-system --type=strategic --patch-file="$patch_file"
-    rm -f "$patch_file"
-    
-    # Restart CoreDNS to pick up changes
-    kubectl rollout restart deployment coredns -n kube-system
-    kubectl rollout status deployment coredns -n kube-system --timeout=60s
-    
-    echo -e "${GREEN}✓ CoreDNS configured: ${auth_hostname} → ${keycloak_ip}${NC}"
-    echo -e "${YELLOW}  Pods can now reach Keycloak via ${auth_hostname} internally${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Install Redis (for rate limiting & caching)
-# -----------------------------------------------------------------------------
 install_redis() {
     if [[ "$INSTALL_REDIS" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Redis (INSTALL_REDIS=false)${NC}"
+        warn "Skipping Redis (INSTALL_REDIS=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing Redis...${NC}"
-    
-    # Create database namespace if not exists
-    kubectl apply -f "$SCRIPT_DIR/namespaces/database.yaml"
-    
-    # Deploy Redis
-    kubectl apply -f "$SCRIPT_DIR/manifests/redis.yaml"
-    
-    # Wait for Redis to be ready
-    echo -e "${YELLOW}Waiting for Redis to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app=redis \
-        -n database --timeout=120s || true
-    
-    echo -e "${GREEN}✓ Redis installed (redis.database.svc.cluster.local:6379)${NC}"
+    step "Installing Redis"
+    kubectl apply -f "$VPS_MANIFESTS_DIR/redis.yaml"
+    kubectl rollout status deployment/redis -n database --timeout=120s \
+        || warn "Redis is still starting: kubectl get pods -n database"
 }
 
 # -----------------------------------------------------------------------------
-# Install Prometheus
+# Observability
 # -----------------------------------------------------------------------------
-install_prometheus() {
-    if [[ "$INSTALL_PROMETHEUS" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Prometheus (INSTALL_PROMETHEUS=false)${NC}"
+# helm_install <flag> <release> <chart> <version> <values-file> <timeout>
+helm_install() {
+    local flag="$1" release="$2" chart="$3" version="$4" values="$5" timeout="$6"
+    if [[ "${!flag}" != "true" ]]; then
+        warn "Skipping ${release} (${flag}=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing Prometheus...${NC}"
-    
-    kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-    
-    helm upgrade --install prometheus prometheus-community/prometheus \
+    step "Installing ${release} (chart ${version})"
+    helm upgrade --install "$release" "$chart" \
+        --version "$version" \
         --namespace monitoring \
-        -f "$SCRIPT_DIR/values/prometheus.yaml" \
-        --wait --timeout 5m
-    
-    echo -e "${GREEN}✓ Prometheus installed${NC}"
+        -f "$VPS_VALUES_DIR/$values" \
+        --wait --timeout "$timeout"
+}
+
+install_observability() {
+    # 10m: the server Deployment is recreated with a 300 s termination grace period
+    helm_install INSTALL_PROMETHEUS prometheus prometheus-community/prometheus \
+        "$PROMETHEUS_CHART_VERSION" prometheus.yaml 10m
+    helm_install INSTALL_GRAFANA grafana grafana/grafana "$GRAFANA_CHART_VERSION" grafana.yaml 5m
+    helm_install INSTALL_LOKI loki grafana/loki "$LOKI_CHART_VERSION" loki.yaml 5m
+    if [[ "$INSTALL_LOKI" == "true" ]]; then
+        helm_install INSTALL_PROMTAIL promtail grafana/promtail "$PROMTAIL_CHART_VERSION" promtail.yaml 3m
+    fi
 }
 
 # -----------------------------------------------------------------------------
-# Install Grafana
-# -----------------------------------------------------------------------------
-install_grafana() {
-    if [[ "$INSTALL_GRAFANA" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Grafana (INSTALL_GRAFANA=false)${NC}"
-        return 0
-    fi
-    
-    echo -e "\n${YELLOW}>>> Installing Grafana...${NC}"
-    
-    helm upgrade --install grafana grafana/grafana \
-        --namespace monitoring \
-        -f "$SCRIPT_DIR/values/grafana.yaml" \
-        --wait --timeout 5m
-    
-    echo -e "${GREEN}✓ Grafana installed${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Install Loki (SingleBinary) - centralized log aggregation
-# Added 2026-05 to address the observability gap revealed by the
-# coterie-webapp-alpha postmortem (logs --previous lost on pod prune).
-# -----------------------------------------------------------------------------
-install_loki() {
-    if [[ "$INSTALL_LOKI" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Loki (INSTALL_LOKI=false)${NC}"
-        return 0
-    fi
-
-    echo -e "\n${YELLOW}>>> Installing Loki (SingleBinary)...${NC}"
-
-    kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-
-    helm upgrade --install loki grafana/loki \
-        --namespace monitoring \
-        -f "$SCRIPT_DIR/values/loki.yaml" \
-        --wait --timeout 5m
-
-    echo -e "${GREEN}✓ Loki installed (loki.monitoring.svc.cluster.local:3100)${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Install Promtail (DaemonSet log collector that ships to Loki)
-# -----------------------------------------------------------------------------
-install_promtail() {
-    if [[ "$INSTALL_PROMTAIL" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Promtail (INSTALL_PROMTAIL=false)${NC}"
-        return 0
-    fi
-
-    if [[ "$INSTALL_LOKI" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Promtail (Loki disabled, nothing to ship to)${NC}"
-        return 0
-    fi
-
-    echo -e "\n${YELLOW}>>> Installing Promtail (DaemonSet)...${NC}"
-
-    helm upgrade --install promtail grafana/promtail \
-        --namespace monitoring \
-        -f "$SCRIPT_DIR/values/promtail.yaml" \
-        --wait --timeout 3m
-
-    echo -e "${GREEN}✓ Promtail installed (logs shipping to Loki)${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Install Sealed Secrets
+# GitOps
 # -----------------------------------------------------------------------------
 install_sealed_secrets() {
     if [[ "$INSTALL_SEALED_SECRETS" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Sealed Secrets (INSTALL_SEALED_SECRETS=false)${NC}"
+        warn "Skipping Sealed Secrets (INSTALL_SEALED_SECRETS=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing Sealed Secrets Controller...${NC}"
-    
+    step "Installing the Sealed Secrets controller"
     helm upgrade --install sealed-secrets sealed-secrets/sealed-secrets \
+        --version "$SEALED_SECRETS_CHART_VERSION" \
         --namespace kube-system \
-        -f "$SCRIPT_DIR/values/sealed-secrets.yaml" \
+        -f "$VPS_VALUES_DIR/sealed-secrets.yaml" \
         --wait --timeout 3m
-    
-    # Wait for controller to be ready
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=sealed-secrets \
-        -n kube-system --timeout=120s || true
-    
-    echo -e "${GREEN}✓ Sealed Secrets Controller installed${NC}"
-    
-    # SECURITY: Store in /root/ - use export-secrets.sh to retrieve
-    local secrets_dir="/root/.k3s-secrets"
-    mkdir -p "$secrets_dir"
-    
-    # Export public key for client-side encryption
-    echo -e "${YELLOW}>>> Exporting Sealed Secrets public key...${NC}"
-    
-    # Wait a moment for the controller to generate its key
-    sleep 5
-    
-    # Extract cert directly from the controller's secret (no kubeseal needed)
-    local secret_name
-    secret_name=$(kubectl get secrets -n kube-system -o name 2>/dev/null | grep sealed-secrets-key | head -1 | cut -d'/' -f2)
-    
-    if [[ -n "$secret_name" ]]; then
-        kubectl get secret -n kube-system "$secret_name" -o jsonpath='{.data.tls\.crt}' | \
-            base64 -d > "$secrets_dir/sealed-secrets-pub.pem" 2>/dev/null
-    fi
-    
-    if [[ -s "$secrets_dir/sealed-secrets-pub.pem" ]]; then
-        echo -e "${GREEN}✓ Public key saved to /root/.k3s-secrets/sealed-secrets-pub.pem${NC}"
-        echo -e "${YELLOW}  Export with: sudo ./vps/scripts/export-secrets.sh export-cert /tmp/cert.pem${NC}"
-    else
-        echo -e "${YELLOW}⚠ Could not export public key (controller may still be initializing)${NC}"
-        echo -e "${YELLOW}  Run later: sudo ./vps/scripts/export-secrets.sh export-cert /tmp/cert.pem${NC}"
-    fi
+    ok "Sealed Secrets ready: back up its key with export-secrets.sh backup-sealing-key"
 }
 
-# -----------------------------------------------------------------------------
-# Install Argo CD
-# -----------------------------------------------------------------------------
 install_argocd() {
     if [[ "$INSTALL_ARGOCD" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Argo CD (INSTALL_ARGOCD=false)${NC}"
+        warn "Skipping Argo CD (INSTALL_ARGOCD=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Installing Argo CD...${NC}"
-    
-    # Create namespace
-    kubectl apply -f "$SCRIPT_DIR/namespaces/gitops.yaml"
-    
-    # Install Argo CD
+    step "Installing Argo CD and Argo CD Image Updater"
     helm upgrade --install argocd argo/argo-cd \
+        --version "$ARGOCD_CHART_VERSION" \
         --namespace argocd \
-        -f "$SCRIPT_DIR/values/argocd.yaml" \
+        -f "$VPS_VALUES_DIR/argocd.yaml" \
         --wait --timeout 5m
-    
-    # Wait for Argo CD server to be ready
-    echo -e "${YELLOW}Waiting for Argo CD to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=argocd-server \
-        -n argocd --timeout=300s || true
-    
-    echo -e "${GREEN}✓ Argo CD installed${NC}"
-}
-
-# -----------------------------------------------------------------------------
-# Install Argo CD Image Updater
-# -----------------------------------------------------------------------------
-install_argocd_image_updater() {
-    if [[ "$INSTALL_ARGOCD" != "true" ]]; then
-        return 0
-    fi
-    
-    echo -e "\n${YELLOW}>>> Installing Argo CD Image Updater...${NC}"
-    
     helm upgrade --install argocd-image-updater argo/argocd-image-updater \
+        --version "$ARGOCD_IMAGE_UPDATER_CHART_VERSION" \
         --namespace argocd \
-        -f "$SCRIPT_DIR/values/argocd-image-updater.yaml" \
+        -f "$VPS_VALUES_DIR/argocd-image-updater.yaml" \
         --wait --timeout 3m
-    
-    echo -e "${GREEN}✓ Argo CD Image Updater installed${NC}"
+    bash "$SCRIPT_DIR/scripts/apply-config.sh"
 }
 
-# -----------------------------------------------------------------------------
-# Generate manifests from templates
-# -----------------------------------------------------------------------------
-generate_manifests() {
-    echo -e "\n${YELLOW}>>> Generating manifests from templates...${NC}"
-    
-    if [[ -f "$SCRIPT_DIR/scripts/apply-config.sh" ]]; then
-        if [[ -f "$SCRIPT_DIR/config.env" ]]; then
-            bash "$SCRIPT_DIR/scripts/apply-config.sh"
-            echo -e "${GREEN}✓ Manifests generated${NC}"
-        else
-            echo -e "${YELLOW}⚠ config.env not found, using existing manifests${NC}"
-            echo -e "  Create from: cp $SCRIPT_DIR/config.env.example $SCRIPT_DIR/config.env"
-        fi
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Setup Argo CD Auto-Discovery
-# -----------------------------------------------------------------------------
-setup_argocd_autodiscover() {
-    if [[ "$INSTALL_ARGOCD" != "true" ]]; then
+setup_postgres_backup() {
+    if [[ "$INSTALL_POSTGRESQL" != "true" ]]; then
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Setting up Argo CD Auto-Discovery...${NC}"
-    
-    # Apply the autodiscover ApplicationSets (scm-token is managed separately via export-secrets.sh)
-    if [[ -f "$SCRIPT_DIR/manifests/argocd-autodiscover.yaml" ]]; then
-        kubectl apply -f "$SCRIPT_DIR/manifests/argocd-autodiscover.yaml"
-        echo -e "${GREEN}✓ Auto-Discovery ApplicationSets created${NC}"
-    else
-        echo -e "${YELLOW}⚠ argocd-autodiscover.yaml not found, skipping${NC}"
-    fi
-    
-    # Apply ImageUpdater CRs (required by argocd-image-updater v1.1.0+ to detect Applications)
-    if [[ -f "$SCRIPT_DIR/manifests/argocd-image-updater-crs.yaml" ]]; then
-        kubectl apply -f "$SCRIPT_DIR/manifests/argocd-image-updater-crs.yaml"
-        echo -e "${GREEN}✓ Image Updater CRs created (alpha + prod)${NC}"
-    else
-        echo -e "${YELLOW}⚠ argocd-image-updater-crs.yaml not found, skipping${NC}"
-    fi
-    
-    echo -e "${YELLOW}⚠ Don't forget to set the SCM token:${NC}"
-    echo -e "  ${BLUE}sudo ./vps/scripts/export-secrets.sh set-scm-credentials github${NC}"
+    step "Installing the PostgreSQL backup CronJobs"
+    # Same image as the server. No --wait: the backup PVC binds when the first
+    # job runs (WaitForFirstConsumer)
+    helm upgrade --install postgres-backup "$SCRIPT_DIR/postgres-backup" --namespace storage \
+        -f "$VPS_VALUES_DIR/postgresql-image.yaml"
 }
 
-# -----------------------------------------------------------------------------
-# Setup secrets (generates passwords and creates K8s secrets)
-# -----------------------------------------------------------------------------
-setup_secrets() {
-    echo -e "\n${YELLOW}>>> Setting up secrets...${NC}"
-    
-    if [[ -f "$SCRIPT_DIR/scripts/setup-secrets.sh" ]]; then
-        bash "$SCRIPT_DIR/scripts/setup-secrets.sh" setup
-    else
-        echo -e "${RED}Error: scripts/setup-secrets.sh not found${NC}"
-        exit 1
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Setup PostgreSQL Backup CronJob
-# -----------------------------------------------------------------------------
-setup_postgres_backup() {
-    echo -e "\n${YELLOW}>>> Setting up PostgreSQL backup CronJob...${NC}"
-    
-    # Check if helm chart directory exists
-    if [[ -d "$SCRIPT_DIR/postgres-backup" ]]; then
-        helm upgrade --install postgres-backup "$SCRIPT_DIR/postgres-backup" \
-            --namespace storage \
-            --wait --timeout 2m || true
-        echo -e "${GREEN}✓ PostgreSQL backup CronJobs configured (daily/weekly/monthly)${NC}"
-    else
-        echo -e "${YELLOW}⚠ postgres-backup chart not found, skipping${NC}"
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Apply Network Policies (security hardening)
-# -----------------------------------------------------------------------------
 apply_network_policies() {
     if [[ "$INSTALL_NETWORK_POLICIES" != "true" ]]; then
-        echo -e "${YELLOW}>>> Skipping Network Policies (INSTALL_NETWORK_POLICIES=false)${NC}"
+        warn "Skipping network policies (INSTALL_NETWORK_POLICIES=false)"
         return 0
     fi
-    
-    echo -e "\n${YELLOW}>>> Applying Network Policies (security hardening)...${NC}"
-    
-    if [[ -f "$SCRIPT_DIR/manifests/network-policies.yaml" ]]; then
-        kubectl apply -f "$SCRIPT_DIR/manifests/network-policies.yaml"
-        echo -e "${GREEN}✓ Network Policies applied${NC}"
-        echo -e "${YELLOW}  Pod-to-pod communication is now restricted${NC}"
-    else
-        echo -e "${YELLOW}⚠ network-policies.yaml not found, skipping${NC}"
-    fi
+    step "Applying network policies"
+    kubectl apply -f "$VPS_MANIFESTS_DIR/network-policies.yaml"
 }
 
 # -----------------------------------------------------------------------------
-# Print summary
+# Summary
 # -----------------------------------------------------------------------------
 print_summary() {
-    echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}         Installation Complete!                               ${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    
-    echo -e "\n${YELLOW}Cluster Info:${NC}"
-    kubectl get nodes
-    
-    echo -e "\n${YELLOW}Services per namespace:${NC}"
-    local namespaces="storage database security monitoring nginx-gateway argocd"
-    for ns in $namespaces; do
-        echo -e "\n${BLUE}[$ns]${NC}"
-        kubectl get pods -n $ns 2>/dev/null || echo "  (empty)"
-    done
-    
-    # Get external IP
-    EXTERNAL_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
-    
-    echo -e "\n${YELLOW}Access Information:${NC}"
-    echo -e "  Kubeconfig: /etc/rancher/k3s/k3s.yaml"
-    echo -e "  External IP: ${EXTERNAL_IP}"
-    echo -e "  Credentials: sudo ./vps/scripts/export-secrets.sh show"
-    
-    if [[ "$INSTALL_GRAFANA" == "true" ]]; then
-        echo -e "\n${YELLOW}Grafana:${NC}"
-        echo -e "  Port-forward: kubectl port-forward -n monitoring svc/grafana 3000:80"
-        echo -e "  User: admin"
-        echo -e "  Password: sudo ./vps/scripts/export-secrets.sh show grafana"
-        echo -e "  Loki datasource pre-configured; dashboards 15760/15757/13639/9578 pre-loaded."
-    fi
+    local external_ip
+    external_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
-    if [[ "$INSTALL_LOKI" == "true" ]]; then
-        echo -e "\n${YELLOW}Loki (centralized logs):${NC}"
-        echo -e "  Internal: loki.monitoring.svc.cluster.local:3100"
-        echo -e "  Query in Grafana: select 'Loki' datasource in Explore"
-        echo -e "  Example LogQL: {namespace=\"<app>-alpha\"} |= \"ERROR\""
-        echo -e "  Retention: 7 days (configurable in vps/values/loki.yaml)"
-    fi
-
-    if [[ "$INSTALL_PROMETHEUS" == "true" ]]; then
-        echo -e "\n${YELLOW}Alertmanager (no receivers by default):${NC}"
-        echo -e "  Port-forward: kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:80"
-        echo -e "  Configure receivers (Discord/Slack/email) in vps/values/prometheus.yaml"
-        echo -e "  See vps/docs/observability.md for Discord webhook recipe."
-    fi
-    
-    if [[ "$INSTALL_KEYCLOAK" == "true" ]]; then
-        echo -e "\n${YELLOW}Keycloak:${NC}"
-        echo -e "  Port-forward: kubectl port-forward -n security svc/keycloak 8080:80"
-        echo -e "  User: admin"
-        echo -e "  Password: sudo ./vps/scripts/export-secrets.sh show keycloak"
-    fi
-    
-    if [[ "$INSTALL_ARGOCD" == "true" ]]; then
-        echo -e "\n${YELLOW}Argo CD:${NC}"
-        echo -e "  Port-forward: kubectl port-forward -n argocd svc/argocd-server 8443:443"
-        echo -e "  URL: https://localhost:8443 (or configure Ingress)"
-        echo -e "  User: admin"
-        echo -e "  Password: sudo ./vps/scripts/export-secrets.sh show argocd"
-        echo -e "\n${YELLOW}GitOps - Deploy your applications:${NC}"
-        echo -e "  1. Add your repo to Argo CD (see docs)"
-        echo -e "  2. Apply Application CRDs from your app repo"
-        echo -e "  3. Argo CD will sync automatically"
-    fi
-    
-    echo -e "\n${YELLOW}PostgreSQL:${NC}"
-    echo -e "  Internal: postgresql.storage.svc.cluster.local:5432"
-    echo -e "  Databases: appdb (main), keycloak"
-    
-    if [[ "$INSTALL_REDIS" == "true" ]]; then
-        echo -e "\n${YELLOW}Redis:${NC}"
-        echo -e "  Internal: redis.database.svc.cluster.local:6379"
-        echo -e "  Usage: rate limiting, caching (no persistence)"
-    fi
-    
-    echo -e "\n${YELLOW}Next steps (see vps/docs/vps-deployment.md for details):${NC}"
-    
-    local step=1
-    
-    # Step: Configure TLS (cert-manager)
-    echo -e "  ${step}. Configure TLS (cert-manager):"
-    echo -e "     ${BLUE}sudo ./vps/scripts/setup-cert-manager.sh --email admin@yourdomain.com${NC}"
-    ((step++))
-    
-    # Step: Configure Gateway API or Ingress
-    if [[ "$INSTALL_GATEWAY_API" == "true" ]]; then
-        echo -e "  ${step}. Configure Gateway API:"
-        echo -e "     ${BLUE}sudo ./vps/scripts/setup-gateway-api.sh --domain yourdomain.com${NC}"
-    else
-        echo -e "  ${step}. Configure Ingress:"
-        echo -e "     ${BLUE}sudo ./vps/scripts/setup-ingress.sh --domain yourdomain.com --tls${NC}"
-    fi
-    ((step++))
-    
-    # Step: Configure DNS
-    echo -e "  ${step}. Configure DNS:"
-    echo -e "     ${BLUE}*.yourdomain.com  A  ${EXTERNAL_IP}${NC}"
-    ((step++))
-    
-    # Step: Configure SCM token
-    echo -e "  ${step}. Configure SCM token (GitHub/GitLab):"
+    banner "Installation complete"
+    kubectl get pods -A
+    echo ""
+    echo -e "${YELLOW}Next steps (vps/README.md):${NC}"
+    echo -e "  1. Workstation access through an SSH tunnel:"
+    echo -e "     ${BLUE}./vps/scripts/setup-remote.sh ${external_ip} --user <ssh-user>${NC}"
+    echo -e "  2. Back up the Sealed Secrets key, then copy it off the server:"
+    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh backup-sealing-key${NC}"
+    echo -e "  3. DNS: point every hostname of GATEWAY_HOSTNAMES to ${external_ip}"
+    echo -e "  4. Gateway, certificates and Keycloak routes:"
+    echo -e "     ${BLUE}sudo ./vps/scripts/setup-gateway-api.sh${NC}"
+    echo -e "  5. Repository access for Argo CD:"
     echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh set-scm-credentials github${NC}"
-    ((step++))
-    
-    # Step: Onboard application
-    echo -e "  ${step}. Onboard your application:"
+    echo -e "  6. Applications:"
     echo -e "     ${BLUE}sudo ./vps/scripts/onboard-app.sh <app-name>${NC}"
-    ((step++))
-    
-    # Step: Export Sealed Secrets cert
-    echo -e "  ${step}. Export Sealed Secrets certificate:"
-    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh export-cert /tmp/sealed-secrets-pub.pem${NC}"
-    
-    echo -e "\n${RED}⚠️  IMPORTANT: Credentials are stored securely in /root/.k3s-secrets/${NC}"
-    echo -e "  ${BLUE}View: sudo ./vps/scripts/export-secrets.sh show${NC}"
+    echo ""
+    echo -e "Credentials: ${BLUE}sudo ./vps/scripts/export-secrets.sh show${NC}"
 }
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
 main() {
-    check_root
+    case "${1:-}" in
+        -h|--help) usage; exit 0 ;;
+        "") ;;
+        *) usage; die "unknown argument: $1" ;;
+    esac
+
+    banner "k3s-stack - VPS installation"
+    require_root
     check_system
+    bash "$SCRIPT_DIR/scripts/apply-config.sh" --check
+    load_config
+    use_k3s_kubeconfig
+
     install_dependencies
-    generate_manifests     # Generate manifests from templates (config.env)
     install_k3s
+    harden_host
     install_helm
     setup_helm_repos
     create_namespaces
-    setup_secrets          # Generate and create K8s secrets BEFORE installing services
-    install_gateway_api    # Gateway API with NGINX Gateway Fabric
+    setup_secrets
+    install_gateway_api
+    install_cert_manager
     install_postgresql
-    create_keycloak_database  # Create Keycloak DB after PostgreSQL is ready
+    create_keycloak_database
     install_keycloak
-    configure_coredns_internal_hosts  # Fix hairpin NAT for auth.<domain>
-    install_prometheus
-    install_grafana
-    install_loki
-    install_promtail
     install_redis
+    install_observability
     install_sealed_secrets
     install_argocd
-    install_argocd_image_updater
-    setup_argocd_autodiscover
     setup_postgres_backup
     apply_network_policies
     print_summary

@@ -2,157 +2,71 @@
 set -euo pipefail
 
 # =============================================================================
-# Deploy Reference Applications on Local K3d Cluster
-# Deploys:
-#   1. react-starter-kit (Frontend React on Nginx with Gateway API HTTPRoute)
-#   2. coterie-webapp (Backend Spring Boot / Kotlin with Gateway API HTTPRoute)
+# Deploys the reference application coterie-webapp on the local k3d cluster:
+#   ../coterie-webapp/helm/coterie-webapp (values-local.yaml), http://coterie.local
+# Its image comes from GHCR: the Secret ghcr-secret must exist in the namespace
+# (kubectl create secret docker-registry), unless values-local.yaml points to an
+# image built locally and loaded with "k3d image import".
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STACK_ROOT="$(dirname "$SCRIPT_DIR")"
-WORKSPACE_DIR="$(dirname "$STACK_ROOT")"
+WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=../vps/scripts/lib/common.sh
+source "$SCRIPT_DIR/../vps/scripts/lib/common.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+CLUSTER_NAME="dev-cluster"
+COTERIE_NAMESPACE="coterie-webapp-local"
+COTERIE_DATABASE="coterie-webapp-local"
+# Client secret of the local Keycloak client of coterie-webapp (its values-local.yaml)
+COTERIE_KEYCLOAK_CLIENT_SECRET="local-client-secret-123"
 
-DEPLOY_REACT=true
-DEPLOY_COTERIE=true
-
-show_help() {
-    cat <<EOF
-Usage: ./deploy-app.sh [OPTIONS]
-
-Options:
-  --react-only          Deploy only react-starter-kit (Frontend)
-  --coterie-only        Deploy only coterie-webapp (Backend)
-  --all                 Deploy both applications (Default)
-  -h, --help            Show this help message
-EOF
-    exit 0
+usage() {
+    printf '%s\n' \
+        "Usage: ./local/deploy-app.sh" \
+        "" \
+        "Deploys coterie-webapp (${WORKSPACE_DIR}/coterie-webapp) on the k3d cluster" \
+        "'${CLUSTER_NAME}': PostgreSQL role and database, Secrets, then the Helm chart" \
+        "with values-local.yaml. The image is pulled from GHCR with the Secret" \
+        "ghcr-secret of the namespace ${COTERIE_NAMESPACE}."
 }
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --react-only)
-            DEPLOY_REACT=true
-            DEPLOY_COTERIE=false
-            shift
-            ;;
-        --coterie-only)
-            DEPLOY_REACT=false
-            DEPLOY_COTERIE=true
-            shift
-            ;;
-        --all)
-            DEPLOY_REACT=true
-            DEPLOY_COTERIE=true
-            shift
-            ;;
-        -h|--help)
-            show_help
-            ;;
-        *)
-            echo -e "${RED}Unknown option: $1${NC}"
-            show_help
-            ;;
+deploy_coterie() {
+    local chart="$WORKSPACE_DIR/coterie-webapp/helm/coterie-webapp" password
+    step "coterie-webapp"
+    [[ -d "$chart" ]] || die "$chart not found"
+    [[ -s "$SCRIPT_DIR/postgres_password.txt" ]] || die "local/postgres_password.txt missing: run local/install.sh first"
+    password=$(cat "$SCRIPT_DIR/postgres_password.txt")
+
+    kubectl create namespace "$COTERIE_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl get secret ghcr-secret -n "$COTERIE_NAMESPACE" >/dev/null 2>&1 \
+        || warn "no Secret ghcr-secret in ${COTERIE_NAMESPACE}: the GHCR image cannot be pulled"
+    pg_wait_ready 120s
+    pg_admin_exec "$VPS_SQL_DIR/ensure-role-database.sql" \
+        "role=$COTERIE_DATABASE" "password=$password" "database=$COTERIE_DATABASE" reset_password=false
+    apply_secret "$COTERIE_NAMESPACE" coterie-webapp-db "password=$password"
+    apply_secret "$COTERIE_NAMESPACE" keycloak-client "client-secret=$COTERIE_KEYCLOAK_CLIENT_SECRET"
+
+    helm dependency build "$chart" >/dev/null
+    helm upgrade --install coterie-webapp "$chart" \
+        --namespace "$COTERIE_NAMESPACE" \
+        -f "$chart/values-local.yaml" \
+        --wait --timeout 5m || warn "coterie-webapp is not ready yet: kubectl get pods -n $COTERIE_NAMESPACE"
+    ok "coterie-webapp: http://coterie.local (/etc/hosts: 127.0.0.1 coterie.local)"
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help) usage; exit 0 ;;
+        "") ;;
+        *) usage; die "unknown option: $1" ;;
     esac
-done
+    require_commands k3d kubectl helm
+    KUBECONFIG="$(k3d kubeconfig write "$CLUSTER_NAME")" || die "k3d cluster $CLUSTER_NAME not found: run local/install.sh"
+    export KUBECONFIG
 
-# Ensure context is local
-kubectl config use-context k3d-dev-cluster >/dev/null 2>&1 || true
+    deploy_coterie
+    banner "Applications"
+    kubectl get httproutes -A
+}
 
-# -----------------------------------------------------------------------------
-# 1. Deploy react-starter-kit (Frontend)
-# -----------------------------------------------------------------------------
-if [ "$DEPLOY_REACT" = true ]; then
-    echo -e "\n${BLUE}=================================================================${NC}"
-    echo -e "${YELLOW}>>> Deploying react-starter-kit (Frontend)...${NC}"
-    echo -e "${BLUE}=================================================================${NC}"
-
-    REACT_DIR="$WORKSPACE_DIR/react-starter-kit"
-    if [ ! -d "$REACT_DIR" ]; then
-        echo -e "${RED}Error: Directory not found: $REACT_DIR${NC}"
-    else
-        # Check if docker image exists locally or build it
-        if ! docker image inspect react-starter-kit:latest >/dev/null 2>&1; then
-            echo -e "${YELLOW}Building Docker image react-starter-kit:latest...${NC}"
-            docker build -t react-starter-kit:latest "$REACT_DIR"
-        else
-            echo -e "${GREEN}✓ Docker image react-starter-kit:latest found${NC}"
-        fi
-
-        echo -e "${YELLOW}Importing image into k3d dev-cluster...${NC}"
-        k3d image import react-starter-kit:latest -c dev-cluster
-
-        echo -e "${YELLOW}Applying Kubernetes manifests (kustomize)...${NC}"
-        kubectl apply -k "$REACT_DIR/kube"
-
-        echo -e "${YELLOW}Waiting for react-starter-kit rollout...${NC}"
-        kubectl rollout status deployment/react-starter-kit -n ns-react-starter-kit --timeout=120s || true
-        echo -e "${GREEN}✓ react-starter-kit deployed! Accessible at: http://react-starter-kit.local${NC}"
-    fi
-fi
-
-# -----------------------------------------------------------------------------
-# 2. Deploy coterie-webapp (Backend)
-# -----------------------------------------------------------------------------
-if [ "$DEPLOY_COTERIE" = true ]; then
-    echo -e "\n${BLUE}=================================================================${NC}"
-    echo -e "${YELLOW}>>> Deploying coterie-webapp (Backend)...${NC}"
-    echo -e "${BLUE}=================================================================${NC}"
-
-    COTERIE_DIR="$WORKSPACE_DIR/coterie-webapp"
-    CHART_DIR="$COTERIE_DIR/helm/coterie-webapp"
-
-    if [ ! -d "$CHART_DIR" ]; then
-        echo -e "${RED}Error: Helm chart not found: $CHART_DIR${NC}"
-    else
-        # Ensure local namespace exists
-        kubectl create namespace coterie-webapp-local --dry-run=client -o yaml | kubectl apply -f -
-
-        # Retrieve postgres password
-        PG_PASSWORD=$(cat "$SCRIPT_DIR/postgres_password.txt" 2>/dev/null || echo "localdevpassword123")
-
-        # Create database in postgres if not exists
-        echo -e "${YELLOW}Ensuring database coterie-webapp-local exists in PostgreSQL...${NC}"
-        kubectl exec -i -n storage postgresql-0 -- env PGPASSWORD="$PG_PASSWORD" psql -U postgres <<EOSQL 2>/dev/null || true
-SELECT 'CREATE DATABASE "coterie-webapp-local"' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'coterie-webapp-local')\gexec
-GRANT ALL PRIVILEGES ON DATABASE "coterie-webapp-local" TO "coterie-webapp-local";
-EOSQL
-
-        # Create required application secrets in target namespace
-        echo -e "${YELLOW}Creating secrets in coterie-webapp-local namespace...${NC}"
-        kubectl create secret generic coterie-webapp-db -n coterie-webapp-local \
-            --from-literal=password="$PG_PASSWORD" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-        kubectl create secret generic keycloak-client -n coterie-webapp-local \
-            --from-literal=client-secret="local-client-secret-123" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-        # Build Helm dependency (common-library)
-        echo -e "${YELLOW}Checking Helm dependencies...${NC}"
-        helm dependency build "$CHART_DIR" >/dev/null 2>&1 || true
-
-        # Deploy with local values
-        echo -e "${YELLOW}Deploying coterie-webapp via Helm...${NC}"
-        helm upgrade --install coterie-webapp "$CHART_DIR" \
-            --namespace coterie-webapp-local \
-            -f "$CHART_DIR/values-local.yaml" \
-            --wait --timeout 5m || true
-
-        echo -e "${GREEN}✓ coterie-webapp deployment initiated! Accessible at: http://coterie.local${NC}"
-    fi
-fi
-
-echo -e "\n${BLUE}=================================================================${NC}"
-echo -e "${GREEN}    Applications Deployment Summary                             ${NC}"
-echo -e "${BLUE}=================================================================${NC}"
-echo -e "HTTPRoutes configured:"
-kubectl get httproutes -A
-echo -e "\nPods state:"
-kubectl get pods -n ns-react-starter-kit 2>/dev/null || true
-kubectl get pods -n coterie-webapp-local 2>/dev/null || true
+main "$@"
