@@ -44,6 +44,16 @@ Then follow [`vps/docs/vps-deployment.md`](vps/docs/vps-deployment.md).
 ./local/deploy-app.sh <app>     # chart ../<app>/helm/<app>, values-local.yaml
 ```
 
+## Example applications
+
+- **Java** (Spring Boot / Kotlin, HTML rendered by the server with HTMX, PostgreSQL, Keycloak):
+  [DevDeNiro/coterie-webapp-alpha](https://github.com/DevDeNiro/coterie-webapp-alpha)
+- **React** (Vite build served by nginx, no database):
+  [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit)
+
+Repository layout expected by the Argo CD auto-discovery:
+[`vps/docs/deployment-flow.md`](vps/docs/deployment-flow.md#example-applications).
+
 ## Project structure
 
 ```text

@@ -257,6 +257,12 @@ restore <app>-alpha
 
 Lire les éventuels avertissements de `pg_restore` (extensions, objets déjà présents).
 
+Le compte `admin` du realm `master` redevient celui de l'ancienne installation : son mot de
+passe est `KEYCLOAK_ADMIN_PASSWORD` de `migration/k3s-secrets-old/credentials.env` (celui de
+`/root/.k3s-secrets/credentials.env` ne vaut que pour une base vide). Le reporter dans
+`credentials.env`, ou le changer dans la console d'administration (port-forward) et y
+enregistrer le nouveau, ainsi que dans les SealedSecrets des applications qui l'utilisent.
+
 ### 12. Redonner accès aux dépôts
 
 Argo CD découvre alors les dépôts et déploie les applications :

@@ -444,6 +444,32 @@ metadata:
         sealedsecrets.bitnami.com/namespace-wide: "true"
 ```
 
+Seal with the same scope: `kubeseal --raw --scope namespace-wide --namespace <app>-<env> ...` (no `--name`).
+
+### 5. SealedSecret Not Decrypted
+
+**Problem:** `no key could decrypt secret (<key>)`: one value was sealed with another certificate (the local k3d
+cluster, for example). The whole SealedSecret is rejected, Argo CD reports the application `Degraded`, and a pod
+referencing the Secret without `optional: true` stays in `CreateContainerConfigError`.
+
+**Solution:** seal every value with the certificate of the VPS (`export-secrets.sh export-cert`).
+
+### 6. Application NetworkPolicy
+
+**Problem:** `Connection refused` towards a platform service, although the platform policies allow the application
+namespaces: the NetworkPolicy of the application chart restricts its own egress.
+
+**Solution:** allow egress to every platform service the application uses: `storage` 5432 (PostgreSQL),
+`database` 6379 (Redis), `security` 80 (Keycloak) and DNS.
+
+### 7. Rolling Update Refused by the Quota
+
+**Problem:** `exceeded quota: <app>-<env>-quota, requested: limits.cpu=...`: during a rolling update the old and the
+new pod run together.
+
+**Solution:** the namespace quota limits (`vps/config/onboarding/<env>.env`) must hold twice the largest pod: lower
+the pod limits, or raise the quota and run `onboard-app.sh <app>` again.
+
 ## File Reference
 
 ### VPS Scripts (`vps/scripts/`)
@@ -466,8 +492,8 @@ Parameters of every script: [`../README.md`](../README.md).
 
 Two public repositories illustrate the two common kinds of applications:
 
-- [DevDeNiro/coterie-webapp-alpha](https://github.com/DevDeNiro/coterie-webapp-alpha): server-side monolith
-  (Spring Boot / Kotlin rendering its templates) using PostgreSQL and Keycloak;
+- [DevDeNiro/coterie-webapp-alpha](https://github.com/DevDeNiro/coterie-webapp-alpha): Java server-side monolith
+  (Spring Boot / Kotlin, HTML rendered with HTMX) using PostgreSQL, Redis and Keycloak;
 - [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit): client application (React / Vite
   build served by nginx), without database (`onboard-app.sh <app> --skip-database`).
 

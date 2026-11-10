@@ -122,7 +122,9 @@ unset VALUE
 ```
 
 Le mot de passe de base à sceller est celui de `export-secrets.sh show my-app` ; un
-SealedSecret n'est déchiffrable que dans le namespace et sous le nom donnés au scellement.
+SealedSecret n'est déchiffrable que dans le namespace et sous le nom donnés au scellement
+(avec l'annotation `sealedsecrets.bitnami.com/namespace-wide`, sceller avec
+`--scope namespace-wide` et sans `--name`).
 Copier les valeurs chiffrées dans `values-alpha.yaml` et `values-prod.yaml`, puis pousser.
 
 ## Étape 8 : accès depuis le poste
