@@ -13,6 +13,15 @@ global:
   leaderElection:
     namespace: cert-manager
 
+# Gateway API support, off by default: without it the HTTP-01 challenges of the
+# ClusterIssuers (solver gatewayHTTPRoute) fail with "gateway api is not enabled"
+# and no certificate is ever issued. The Gateway API CRDs come with K3s.
+config:
+  apiVersion: controller.config.cert-manager.io/v1alpha1
+  kind: ControllerConfiguration
+  gatewayAPI:
+    enabled: true
+
 resources:
   requests:
     cpu: 10m

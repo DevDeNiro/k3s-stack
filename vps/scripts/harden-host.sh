@@ -106,7 +106,7 @@ configure_firewall() {
 
     step "Firewall (UFW)"
     if ! command -v ufw >/dev/null 2>&1; then
-        run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw
+        run apt_install ufw
     fi
 
     run ufw default deny incoming
@@ -116,6 +116,13 @@ configure_firewall() {
         run ufw delete allow "$port/tcp" >/dev/null 2>&1 || true
         run ufw limit "$port/tcp" comment 'SSH'
     done
+    # UFW applies the first matching rule: the "OpenSSH" application profile (port 22),
+    # allowed by many cloud images, would bypass the rate limit. Removed once the
+    # "limit" rule exists, so SSH stays allowed.
+    # shellcheck disable=SC2086  # word splitting of the port list
+    if list_contains 22 $SSH_PORTS; then
+        run ufw delete allow OpenSSH >/dev/null 2>&1 || true
+    fi
     run ufw allow 80/tcp comment 'HTTP (Gateway)'
     run ufw allow 443/tcp comment 'HTTPS (Gateway)'
     run ufw allow from "$cluster_cidr" comment 'K3s pods'
@@ -177,7 +184,7 @@ harden_ssh() {
 
 enable_auto_updates() {
     step "Automatic security updates"
-    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades
+    run apt_install unattended-upgrades
     run install -m 644 "$VPS_CONFIG_DIR/apt/20auto-upgrades" "$APT_PERIODIC"
     run systemctl enable --now unattended-upgrades
 }

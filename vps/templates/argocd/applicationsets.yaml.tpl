@@ -142,6 +142,7 @@ spec:
                 server: https://kubernetes.default.svc
                 namespace: "{{repository}}-prod"
             syncPolicy:
-                # Auto-sync prod désactivé tant que les secrets prod (coterie-webapp-secrets) ne sont pas prêts
+                # No automated sync in production: sync manually once the production
+                # SealedSecrets of the application are committed
                 syncOptions:
                     - CreateNamespace=true

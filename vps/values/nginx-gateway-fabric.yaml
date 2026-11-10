@@ -66,6 +66,21 @@ nginx:
   # Number of NGINX replicas (when not using HPA)
   replicas: 1
 
+  # hostPorts 80/443 on a single node: the default rolling update starts the new
+  # pod first, which can never be scheduled while the old pod holds the ports, and
+  # the data plane keeps its old configuration (port 443 missing after the HTTPS
+  # listeners are added, NGF upgrades). The old pod stops first instead (a few
+  # seconds without traffic).
+  patches:
+    - type: StrategicMerge
+      value:
+        spec:
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 0
+              maxUnavailable: 1
+
   # Container configuration
   container:
     # hostPorts to expose ports 80/443 directly on the node

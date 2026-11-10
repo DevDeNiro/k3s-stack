@@ -1,7 +1,7 @@
 # Guide de déploiement VPS
 
 Procédure guidée d'une première installation sur un VPS neuf, jusqu'au déploiement d'une
-application (`coterie-webapp`). La référence des scripts et de leurs paramètres est
+application (`my-app` dans les exemples). La référence des scripts et de leurs paramètres est
 [`../README.md`](../README.md) ; la migration d'un VPS déjà installé est décrite dans
 [`security-hardening.md`](security-hardening.md).
 
@@ -38,8 +38,8 @@ nano vps/config.env
 | Variable | Exemple |
 |----------|---------|
 | `SCM_PROVIDER` | `github` |
-| `SCM_ORGANIZATION` | `coterie-app` |
-| `REGISTRY_BASE` | `ghcr.io/coterie-app` |
+| `SCM_ORGANIZATION` | `my-org` |
+| `REGISTRY_BASE` | `ghcr.io/my-org` |
 | `LETSENCRYPT_EMAIL` | `admin@example.com` |
 | `GATEWAY_HOSTNAMES` | `auth.example.com app.example.com alpha.example.com` |
 | `AUTH_HOSTNAMES` | `auth.example.com` |
@@ -92,17 +92,18 @@ dossier `helm/` (voir plus bas).
 ## Étape 6 : onboarder une application
 
 ```bash
-sudo ./vps/scripts/onboard-app.sh coterie-webapp
+sudo ./vps/scripts/onboard-app.sh my-app
 ```
 
-Pour `coterie-webapp-alpha` et `coterie-webapp-prod`, le script crée :
+Pour `my-app-alpha` et `my-app-prod`, le script crée :
 
 - le namespace, avec son quota et son niveau de Pod Security ;
 - le rôle et la base PostgreSQL ;
-- le Secret `coterie-webapp-db`, dont les URLs exigent TLS ;
+- le Secret `my-app-db`, dont les URLs exigent TLS ;
 - les Secrets d'accès à GHCR et au dépôt.
 
-Les mots de passe sont conservés dans `/root/.k3s-secrets/coterie-webapp.env`. Les
+Une application sans base de données (client statique servi par nginx) s'onboarde avec
+`--skip-database`. Les mots de passe sont conservés dans `/root/.k3s-secrets/my-app.env`. Les
 routes de l'application (HTTPRoutes de son chart) s'attachent à la Gateway
 `infrastructure-gateway` ; leurs hostnames doivent figurer dans `GATEWAY_HOSTNAMES`.
 
@@ -113,12 +114,15 @@ routes de l'application (HTTPRoutes de son chart) s'attachent à la Gateway
 ssh <user>@<vps> 'sudo <chemin-du-clone>/k3s-stack/vps/scripts/export-secrets.sh export-cert ~/sealed-secrets-pub.pem'
 mkdir -p ~/.k3s-secrets && scp <user>@<vps>:sealed-secrets-pub.pem ~/.k3s-secrets/sealed-secrets-pub.pem
 
-# Dans le dépôt de l'application
-./scripts/seal-secrets.sh all coterie-webapp-alpha --cert ~/.k3s-secrets/sealed-secrets-pub.pem
-./scripts/seal-secrets.sh all coterie-webapp-prod --cert ~/.k3s-secrets/sealed-secrets-pub.pem
+# Une valeur chiffrée par clé de Secret, saisie sans écho (jamais en argument)
+read -r -s -p "Valeur : " VALUE; echo
+printf '%s' "$VALUE" | kubeseal --raw --cert ~/.k3s-secrets/sealed-secrets-pub.pem \
+    --namespace my-app-alpha --name my-app-db --from-file=/dev/stdin
+unset VALUE
 ```
 
-Le mot de passe de base à sceller est celui de `export-secrets.sh show coterie-webapp`.
+Le mot de passe de base à sceller est celui de `export-secrets.sh show my-app` ; un
+SealedSecret n'est déchiffrable que dans le namespace et sous le nom donnés au scellement.
 Copier les valeurs chiffrées dans `values-alpha.yaml` et `values-prod.yaml`, puis pousser.
 
 ## Étape 8 : accès depuis le poste
@@ -139,16 +143,16 @@ sudo ./vps/scripts/harden-host.sh --apply --harden-ssh
 sudo ./vps/scripts/setup-secrets.sh set-discord-webhook
 ```
 
-## Stratégie IAM et données (coterie-webapp)
+## Stratégie IAM et données (recommandée)
 
 ### Alpha (`alpha.example.com`)
-- Le profil `alpha` exécute `DataSeeder.kt` au premier démarrage : résidence de
-  démonstration, syndic, gestionnaire et résidents.
-- Le realm `coterie-alpha` contient des comptes de test pré-validés.
+- L'application peut charger des données de démonstration au premier démarrage (profil
+  ou variable d'environnement propre à l'environnement alpha).
+- Un realm Keycloak `<app>-alpha` contient des comptes de test pré-validés.
 
 ### Production (`app.example.com`)
-- `DataSeeder` est désactivé (`SPRING_PROFILES_ACTIVE=prod`).
-- Le realm `coterie-prod` ne contient aucun compte de test.
+- Aucune donnée de démonstration.
+- Le realm `<app>-prod` ne contient aucun compte de test.
 
 ## Auto-découverte Argo CD
 

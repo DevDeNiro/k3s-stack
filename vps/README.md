@@ -179,9 +179,10 @@ sudo ./vps/scripts/harden-host.sh [--apply] [--yes] [--allow-api-from CIDR]... [
                                   [--harden-ssh] [--auto-updates]
 ```
 
-Dry run by default. Firewall policy: incoming traffic denied, SSH rate limited, 80/443
-open, K3s pod and service networks allowed (and forwarded pod traffic), every existing
-6443 rule replaced by the `--allow-api-from` networks only.
+Dry run by default. Firewall policy: incoming traffic denied, SSH rate limited (6 new
+connections per 30 s and address; an `OpenSSH` profile rule, which would bypass the limit,
+is removed), 80/443 open, K3s pod and service networks allowed (and forwarded pod
+traffic), every existing 6443 rule replaced by the `--allow-api-from` networks only.
 
 | Option | Effect |
 |--------|--------|
@@ -353,5 +354,5 @@ make helm-test  # Helm lint and template of the repository charts
 | Gateway without address, sites unreachable | `kubectl get pods,events -n nginx-gateway` (the data plane needs the `privileged` Pod Security level of the namespace) |
 | Certificate pending | DNS of the hostname, port 80 reachable: `kubectl describe certificate -n nginx-gateway`, `kubectl get challenges -A` |
 | Pods without DNS or Internet access | `ufw status` must list the `K3s pods (forwarded)` route rules (`harden-host.sh --apply`) |
-| Application cannot reach PostgreSQL | namespace label `app.kubernetes.io/managed-by=k3s-stack` (set by `onboard-app.sh`) |
+| Application cannot reach PostgreSQL | namespace label `app.kubernetes.io/managed-by=k3s-stack` (set by `onboard-app.sh`); a new pod is admitted by the NetworkPolicies ~2 s after it starts: connect with retries |
 | K3s does not start | `systemctl status k3s`, `journalctl -u k3s -n 100` |

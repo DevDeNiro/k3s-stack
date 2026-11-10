@@ -11,9 +11,9 @@ One paragraph. The root cause, the impact, the fix.
 | Incident date(s) | YYYY-MM-DD HH:MM UTC -> YYYY-MM-DD HH:MM UTC |
 | Detection date | YYYY-MM-DD HH:MM UTC |
 | Severity | (critical / high / medium / low) |
-| Component(s) | (e.g. coterie-webapp-alpha, argocd, postgres) |
+| Component(s) | (e.g. my-app-alpha, argocd, postgres) |
 | Detection source | (alert name, manual report, monitoring dashboard, customer report...) |
-| User-facing impact | (e.g. alpha.macoterie.fr down for 48 days, 0% availability) |
+| User-facing impact | (e.g. alpha.example.com down for 48 days, 0% availability) |
 
 ## Timeline
 - YYYY-MM-DD HH:MM - Event 1 (e.g. deploy of revision X)
@@ -24,7 +24,7 @@ One paragraph. The root cause, the impact, the fix.
 - YYYY-MM-DD HH:MM - Event 6 (e.g. fix deployed)
 
 ## Root cause
-Explain *what* broke and *why*. Include code references with absolute paths if relevant, e.g. `helm/coterie-webapp/values-alpha.yaml:107`.
+Explain *what* broke and *why*. Include code references with absolute paths if relevant, e.g. `helm/my-app/values-alpha.yaml:107`.
 
 ## Evidence
 Quote logs, stacktraces, metrics screenshots. Reference the artifact bundle if applicable.

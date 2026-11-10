@@ -107,7 +107,7 @@ If a Secret is missing, check:
 
 ## 6. The 2026-05-18 class of bugs (placeholder value)
 
-Specific to coterie-webapp but generalizable: a Helm values file shipped a literal placeholder (`<GENERATE_NEW_KEY_PAIR_FOR_X>`) as an env var. The app tried to Base64-decode it at startup, failed, and crashed.
+Seen on an alpha environment ([`postmortem_2026-05-18_alpha_placeholder_keys.md`](postmortem_2026-05-18_alpha_placeholder_keys.md)), and generalizable: a Helm values file shipped a literal placeholder (`<GENERATE_NEW_KEY_PAIR_FOR_X>`) as an env var. The app tried to Base64-decode it at startup, failed, and crashed.
 
 Detection signal in logs: `IllegalArgumentException: Illegal base64 character XX` where XX is a hex value (3c is `<`, 3e is `>`, 24 is `$`).
 

@@ -15,7 +15,7 @@ The k3s-stack ships a complete observability stack tuned for a 4-6 GB VPS:
 Total steady-state: ~1.0 GiB (leaves room for the application workloads).
 
 ## Why we have this stack
-On 2026-05-18 we discovered that `coterie-webapp-alpha` had been in CrashLoopBackOff for **48 days** (25 833 cumulative container restarts) without anyone noticing. See [`postmortem_2026-05-18_coterie_alpha_vapid.md`](postmortem_2026-05-18_coterie_alpha_vapid.md) for the full root-cause analysis.
+On 2026-05-18 we discovered that the alpha environment of an application had been in CrashLoopBackOff for **48 days** (25 833 cumulative container restarts) without anyone noticing. See [`postmortem_2026-05-18_alpha_placeholder_keys.md`](postmortem_2026-05-18_alpha_placeholder_keys.md) for the full root-cause analysis.
 The observability stack is the corrective action: alerts, centralized logs, and dashboards specifically focused on **container restarts and pod health**.
 
 ## Access
@@ -58,12 +58,11 @@ All rules live in `vps/values/prometheus.yaml` under `serverFiles.alerting_rules
 - **NodeDiskPressure** (warning, 10m) — fires when free space on any filesystem < 10%.
 
 ### Application-level (groups `app-*`)
-Ported from `coterie-webapp/docker/observability/alert_rules.yml`. All metrics carry `application="coterie-webapp"` (Micrometer common tag) plus `namespace` (Prometheus relabel), so each alert fires once per `(application, namespace)` pair (i.e. once for alpha and once for prod).
+They apply to every application exposing Micrometer metrics with an `application` tag (Spring Boot: `management.metrics.tags.application=<name>`); the scrape job adds `namespace`, so each alert fires once per `(application, namespace)` pair (once for alpha, once for prod). Applications without these metrics are not concerned. Alerts on business metrics of one application belong to that application.
 - **HighP95Latency / CriticalP99Latency** — latency SLO breaches on `http_server_requests_seconds_bucket`.
 - **SlowDatabaseQueries** — mean `r2dbc_pool_acquire_seconds` > 100 ms for 2 minutes.
 - **HighErrorRate / CriticalErrorRate** — 5xx ratio > 1% (warn) / > 5% (crit).
-- **ExternalServiceFailures** — `coterie_external_send_email_failure_total` rate > 0.1/s.
-- **AppScrapeDown** — `up{job="kubernetes-pods", namespace=~"coterie-webapp-.*"} == 0` for >1m (pod is up, but `/actuator/prometheus` is unreachable).
+- **AppScrapeDown** — `up{job="kubernetes-pods", namespace=~".+-(alpha|prod)"} == 0` for >1m in the application namespaces (pod is up, but its metrics endpoint is unreachable).
 - **CircuitBreakerOpen / CircuitBreakerHalfOpen / HighRetryRate** — Resilience4j signals.
 - **ConnectionPoolExhausted / ConnectionPoolCritical** — R2DBC pool saturation.
 - **HighJvmMemoryUsage** — heap > 85% for 5m.
@@ -95,18 +94,18 @@ kubectl exec -n monitoring prometheus-alertmanager-0 -c alertmanager -- \
 ```
 Within ~30 s (`group_wait`) a message lands in the Discord channel. Otherwise: `kubectl logs -n monitoring prometheus-alertmanager-0 -c alertmanager | grep -i discord`.
 
-## Application dashboards (shipped by `coterie-webapp` chart)
+## Application dashboards (shipped by the application charts)
 
-The Grafana chart now runs a dashboard sidecar that watches the cluster for ConfigMaps labelled `grafana_dashboard=1` across **all namespaces** (`sidecar.dashboards.searchNamespace: ALL`). This is how application charts deliver their own dashboards without touching this monitoring stack.
+The Grafana chart runs a dashboard sidecar that watches the cluster for ConfigMaps labelled `grafana_dashboard=1` across **all namespaces** (`sidecar.dashboards.searchNamespace: ALL`). This is how application charts deliver their own dashboards without touching this monitoring stack.
 
-The `coterie-webapp` Helm chart ships `Coterie Overview` and `Coterie SLO & Latency` via `helm/coterie-webapp/templates/grafana-dashboards-cm.yaml`. They appear automatically in Grafana under the folder generated from the ConfigMap (no manual import). Datasource UIDs are pinned (`prometheus`, `loki`, `alertmanager`) so the dashboards keep working across Grafana reinstalls.
+An application chart renders its dashboards into such a ConfigMap (for example `helm/<app>/templates/grafana-dashboards-cm.yaml` reading the JSON files of `helm/<app>/dashboards/`). They appear automatically in Grafana under the folder generated from the ConfigMap (no manual import). Reference the pinned datasource UIDs (`prometheus`, `loki`, `alertmanager`) so the dashboards keep working across Grafana reinstalls.
 
-To add another dashboard:
-1. Drop its `.json` into `coterie-webapp/helm/coterie-webapp/dashboards/`.
-2. `helm upgrade coterie-webapp ...` (or let ArgoCD sync).
+To add a dashboard:
+1. Drop its `.json` into `helm/<app>/dashboards/` of the application repository.
+2. `helm upgrade <app> ...` (or let Argo CD sync).
 3. Sidecar logs (`kubectl logs -n monitoring deploy/grafana -c grafana-sc-dashboard`) confirm pickup.
 
-If you want to disable shipped dashboards for a deployment, set `monitoring.dashboards.enabled: false` in the chart values.
+Turning the shipped dashboards off is up to the application chart (for example a `monitoring.dashboards.enabled` value).
 
 ## Querying logs (LogQL)
 
@@ -114,19 +113,19 @@ Loki uses LogQL, a Prometheus-like query language for logs. Some recipes:
 
 ```logql
 # All logs of the alpha namespace, last 24h
-{namespace="coterie-webapp-alpha"}
+{namespace="my-app-alpha"}
 
 # Only ERROR-level entries
-{namespace="coterie-webapp-alpha"} |= "ERROR"
+{namespace="my-app-alpha"} |= "ERROR"
 
 # Spring Boot exception names (regex)
-{namespace="coterie-webapp-alpha"} |~ "Caused by:.*Exception"
+{namespace="my-app-alpha"} |~ "Caused by:.*Exception"
 
 # Filter by pod
-{namespace="coterie-webapp-alpha", pod=~"coterie-webapp-alpha-.*"}
+{namespace="my-app-alpha", pod=~"my-app-alpha-.*"}
 
 # Count errors per minute
-sum by (pod) (rate({namespace="coterie-webapp-alpha"} |= "ERROR" [1m]))
+sum by (pod) (rate({namespace="my-app-alpha"} |= "ERROR" [1m]))
 ```
 
 Use Grafana → Explore → Loki datasource for an interactive UI.
@@ -144,12 +143,14 @@ helm upgrade loki grafana/loki --version "$LOKI_CHART_VERSION" -n monitoring -f 
 helm upgrade promtail grafana/promtail --version "$PROMTAIL_CHART_VERSION" -n monitoring -f vps/values/promtail.yaml
 ```
 
-Known items to review (not validated yet):
+NetworkPolicies (`vps/manifests/network-policies.yaml`): Prometheus reaches every pod
+(scrape targets, Alertmanager) and the node (Kubernetes API 6443, kubelet 10250,
+node-exporter 9100), never the Internet; Grafana reaches its three datasources, the
+Kubernetes API (dashboard sidecar) and HTTPS outside the cluster. A policy applies to new
+connections only: after changing one, restart the pods it selects before testing.
+
+Known items to review:
 - Promtail is end-of-life: migrate the log shipping to Grafana Alloy.
-- The `grafana-policy` NetworkPolicy only allows Grafana to reach Prometheus: add Loki
-  (3100) and Alertmanager (9093) to its egress if those datasources fail. Prometheus
-  egress (`prometheus-policy`) does not list Alertmanager (9093) either: check that alerts
-  reach Alertmanager (`prometheus_notifications_errors_total`).
 - On arm64 servers, the default `prometheus-config-reloader` v0.95.1 image does not exist:
   reuse the override of `local/values/prometheus.yaml`.
 

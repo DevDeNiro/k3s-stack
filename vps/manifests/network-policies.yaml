@@ -1,6 +1,12 @@
 # =============================================================================
 # Network Policies - Restrict pod-to-pod communication
 # Apply with: kubectl apply -f vps/manifests/network-policies.yaml
+#
+# Rules apply to new connections: restart the pods selected by a modified policy
+# before testing it (connections opened earlier keep working).
+# Pods using hostNetwork (node-exporter) and the Kubernetes API (port 6443 of the
+# node, behind the Service 10.43.0.1:443) are not matched by namespaceSelector:
+# they are reached through ipBlock rules.
 # =============================================================================
 
 ---
@@ -65,6 +71,8 @@ spec:
       ports:
         - protocol: UDP
           port: 53
+        - protocol: TCP
+          port: 53
 
 ---
 # =============================================================================
@@ -108,6 +116,8 @@ spec:
               k8s-app: kube-dns
       ports:
         - protocol: UDP
+          port: 53
+        - protocol: TCP
           port: 53
 
 ---
@@ -170,6 +180,8 @@ spec:
       ports:
         - protocol: UDP
           port: 53
+        - protocol: TCP
+          port: 53
     # Allow HTTPS outbound (for OIDC providers, updates)
     - to:
         - ipBlock:
@@ -208,27 +220,25 @@ spec:
         - protocol: TCP
           port: 9090
   egress:
-    # Allow scraping all namespaces (metrics)
+    # Pods of every namespace, any port: scrape targets announce their port
+    # (prometheus.io/port, chosen by each application), Alertmanager (9093,
+    # alerts) and DNS included
     - to:
         - namespaceSelector: {}
-      ports:
-        - protocol: TCP
-          port: 9187  # PostgreSQL metrics
-        - protocol: TCP
-          port: 9100  # Node exporter
-        - protocol: TCP
-          port: 8080  # Various
-        - protocol: TCP
-          port: 9000  # Keycloak metrics
-    # Allow DNS
+    # The node: Kubernetes API (service discovery of every target and of
+    # Alertmanager), kubelet (jobs kubernetes-nodes and kubernetes-nodes-cadvisor)
+    # and node-exporter (hostNetwork). The node address is site specific: these
+    # ports only.
     - to:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
+        - ipBlock:
+            cidr: 0.0.0.0/0
       ports:
-        - protocol: UDP
-          port: 53
+        - protocol: TCP
+          port: 6443
+        - protocol: TCP
+          port: 10250
+        - protocol: TCP
+          port: 9100
 
 ---
 apiVersion: networking.k8s.io/v1
@@ -247,7 +257,7 @@ spec:
   # pod network namespace and is not subject to NetworkPolicies
   ingress: []
   egress:
-    # Allow to Prometheus
+    # Datasources: Prometheus, Loki, Alertmanager
     - to:
         - podSelector:
             matchLabels:
@@ -255,6 +265,28 @@ spec:
       ports:
         - protocol: TCP
           port: 9090
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - protocol: TCP
+          port: 3100
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+      ports:
+        - protocol: TCP
+          port: 9093
+    # Kubernetes API: the dashboard sidecar watches the ConfigMaps labelled
+    # grafana_dashboard=1 of every namespace (node address site specific)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
     # Allow DNS
     - to:
         - namespaceSelector: {}
@@ -263,6 +295,8 @@ spec:
               k8s-app: kube-dns
       ports:
         - protocol: UDP
+          port: 53
+        - protocol: TCP
           port: 53
     # Allow HTTPS outbound (for dashboard downloads, plugins)
     - to:

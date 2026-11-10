@@ -22,8 +22,11 @@ spec:
         app: keycloak
         component: identity
     spec:
+      # Pod Security "restricted" profile (the namespace warns above baseline)
       securityContext:
         fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: keycloak
           # Official image, pinned to an exact patch release (shared with local/install.sh)
@@ -100,6 +103,8 @@ spec:
             runAsUser: 1000
             runAsNonRoot: true
             allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
 ---
 apiVersion: v1
 kind: Service

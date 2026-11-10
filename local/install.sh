@@ -129,7 +129,7 @@ install_postgresql() {
     step "PostgreSQL (namespace storage)"
     local password
     password=$(local_password postgres_password.txt)
-    apply_secret storage postgresql-secret "postgres-password=$password" "password=$password"
+    apply_secret storage postgresql-secret "postgres-password=$password"
     # VPS configuration (TLS, pg_hba, tuning), then the local differences
     helm upgrade --install postgresql bitnami/postgresql \
         --version "$POSTGRESQL_CHART_VERSION" \
@@ -238,7 +238,7 @@ print_summary() {
         echo "Keycloak    : http://${LOCAL_AUTH_HOST} (admin password: local/keycloak_password.txt)"
     fi
     echo ""
-    echo "Reference application: ./local/deploy-app.sh (/etc/hosts: 127.0.0.1 coterie.local)"
+    echo "Applications: ./local/deploy-app.sh <app> [--chart DIR] [--values FILE] (local/README.md)"
 }
 
 main() {

@@ -3,19 +3,19 @@
 ## Incident Summary
 
 **Date:** 2026-02-14  
-**Component:** ArgoCD / coterie-webapp-alpha  
+**Component:** ArgoCD / my-app-alpha  
 **Severity:** Medium (Stale deployment on alpha environment)
 
 ## Issue Description
 
-The `coterie-webapp-alpha` application in ArgoCD was reporting an `OutOfSync` and `Degraded` status. More critically,
+The `my-app-alpha` application in ArgoCD was reporting an `OutOfSync` and `Degraded` status. More critically,
 the running Pod was 9 days old, meaning the latest code changes pushed to the `develop` branch were not being deployed,
 despite the CI pipeline presumably passing.
 
 ## Root Cause Analysis
 
-1. **Missing ServiceAccount:** The `ServiceAccount` for `coterie-webapp-alpha` was missing in the namespace. This
-   prevented new ReplicaSets from spinning up pods (Error: `serviceaccount "coterie-webapp-alpha" not found`).
+1. **Missing ServiceAccount:** The `ServiceAccount` for `my-app-alpha` was missing in the namespace. This
+   prevented new ReplicaSets from spinning up pods (Error: `serviceaccount "my-app-alpha" not found`).
 2. **Floating Tag & Deployment Strategy:** The application uses the image tag `develop`. This is a "floating" (mutable)
    tag.
     - Kubernetes does not automatically pull a new image for an existing Pod unless the `imagePullPolicy` is `Always` (

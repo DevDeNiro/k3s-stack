@@ -134,11 +134,19 @@ kubectl get secrets -n <app>-<env>
 ```
 
 Les écrire dans `/var/backups/k3s-stack/migration/<app>.env` (mode 0600), au format lu
-par `onboard-app.sh`. Exemple pour `coterie-webapp` :
+par `onboard-app.sh`. Exemple pour `my-app` :
 
 ```text
-COTERIE_WEBAPP_ALPHA_DB_PASSWORD=...
-COTERIE_WEBAPP_PROD_DB_PASSWORD=...
+MY_APP_ALPHA_DB_PASSWORD=...
+MY_APP_PROD_DB_PASSWORD=...
+```
+
+Conserver aussi les identifiants de l'ancienne installation : `uninstall.sh` supprime
+`/root/.k3s-secrets`, qui contient notamment le token d'accès aux dépôts (étape 12).
+
+```bash
+install -d -m 700 /var/backups/k3s-stack/migration
+cp -a /root/.k3s-secrets /var/backups/k3s-stack/migration/k3s-secrets-old
 ```
 
 ### 4. Exporter les bases
@@ -219,11 +227,18 @@ install -m 600 /var/backups/k3s-stack/migration/<app>.env /root/.k3s-secrets/<ap
 
 ### 11. Restaurer les données
 
-Les objets restaurés appartiennent au rôle de la base (`--no-owner --role`). Keycloak est
-arrêté pendant sa restauration ; il migre ensuite son schéma au démarrage.
+Les objets restaurés appartiennent au rôle de la base (`--no-owner --role`). Keycloak a
+créé son propre schéma à l'installation : sa base est recréée vide avant la restauration
+(sinon les tables de la nouvelle version bloquent `--clean` et le schéma restauré est
+incohérent). Keycloak est arrêté pendant l'opération ; il migre ensuite son schéma et
+ses realms au démarrage.
 
 ```bash
 PGPW=$(kubectl get secret postgresql-secret -n storage -o jsonpath='{.data.postgres-password}' | base64 -d)
+pg() {
+    printf '%s\n' "$PGPW" | kubectl exec -i -n storage postgresql-0 -c postgresql -- \
+        sh -c 'IFS= read -r PGPASSWORD; export PGPASSWORD; exec "$@"' sh "$@"
+}
 restore() {
     { printf '%s\n' "$PGPW"; cat "/var/backups/k3s-stack/migration/$1.dump"; } \
         | kubectl exec -i -n storage postgresql-0 -c postgresql -- sh -c \
@@ -231,6 +246,9 @@ restore() {
              pg_restore -h 127.0.0.1 -U postgres -d "$1" --no-owner --role="$1" --clean --if-exists' restore "$1"
 }
 kubectl scale statefulset keycloak -n security --replicas=0
+kubectl wait --for=delete pod/keycloak-0 -n security --timeout=180s
+pg psql -h 127.0.0.1 -U postgres -d postgres -X \
+    -c 'DROP DATABASE keycloak WITH (FORCE)' -c 'CREATE DATABASE keycloak OWNER keycloak'
 restore keycloak
 kubectl scale statefulset keycloak -n security --replicas=1
 restore <app>-prod

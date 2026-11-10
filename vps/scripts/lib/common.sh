@@ -33,6 +33,7 @@ K3S_KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
 # Shared PostgreSQL instance
 PG_NAMESPACE="storage"
 PG_POD="postgresql-0"
+PG_CONTAINER="postgresql"
 PG_SERVICE_HOST="postgresql.storage.svc.cluster.local"
 PG_ADMIN_SECRET="postgresql-secret"
 PG_ADMIN_SECRET_KEY="postgres-password"
@@ -94,6 +95,39 @@ require_supported_k3s() {
         ''|*[!0-9]*) die "K3S_VERSION: '$1' is not a K3s release (v1.37.2+k3s1)" ;;
     esac
     [ "$minor" -ge 37 ] || die "K3s $1 is not supported: v1.37 or later ships the Gateway API CRDs"
+}
+
+# -----------------------------------------------------------------------------
+# Packages (VPS)
+# On a fresh server the apt-daily and unattended-upgrades timers hold the apt
+# locks for minutes: wait for them instead of failing.
+# -----------------------------------------------------------------------------
+APT_LOCK_TIMEOUT=600
+
+# apt_install <package>...: DPkg::Lock::Timeout makes apt-get wait for the dpkg lock
+apt_install() {
+    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" install -y -qq "$@"
+}
+
+# apt_update: "apt-get update" takes the lists lock, which DPkg::Lock::Timeout does
+# not cover (apt 2.8): retried while another apt process holds it, other errors fail
+apt_update() {
+    local waited=0 err
+    while ! err=$(apt-get update -qq 2>&1 >/dev/null); do
+        case "$err" in
+            *"Could not get lock"*) ;;
+            *) printf '%s\n' "$err" >&2; return 1 ;;
+        esac
+        if [ "$waited" -ge "$APT_LOCK_TIMEOUT" ]; then
+            printf '%s\n' "$err" >&2
+            return 1
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    if [ -n "$err" ]; then
+        printf '%s\n' "$err" >&2
+    fi
 }
 
 # confirm <question>: succeeds when the answer is yes (always with ASSUME_YES=true)
@@ -290,7 +324,7 @@ pg_exec() {
         printf '%s\n' "$password"
         psql_variables "$@"
         cat "$sql_file"
-    } | kubectl exec -i -n "$PG_NAMESPACE" "$PG_POD" -- sh -c "$PG_EXEC_SCRIPT" pg-exec "$user" "$database"
+    } | kubectl exec -i -n "$PG_NAMESPACE" "$PG_POD" -c "$PG_CONTAINER" -- sh -c "$PG_EXEC_SCRIPT" pg-exec "$user" "$database"
 }
 
 # pg_admin_exec <sql-file> [name=value]...: runs the file as the postgres superuser

@@ -2,7 +2,7 @@
 ==============================================================================
 HTTPROUTE TEMPLATE (Gateway API)
 Supports two modes:
-1. Explicit hostnames list (httpRoute.hostnames) - like coterie
+1. Explicit hostnames list (httpRoute.hostnames)
 2. Auto-generated hostname (httpRoute.autoHost) - pattern: <service>.<env>.<domain>
 
 Replaces Ingress for Gateway API migration.

@@ -41,7 +41,7 @@ Then follow [`vps/docs/vps-deployment.md`](vps/docs/vps-deployment.md).
 
 ```bash
 ./local/install.sh --all
-./local/deploy-app.sh
+./local/deploy-app.sh <app>     # chart ../<app>/helm/<app>, values-local.yaml
 ```
 
 ## Project structure

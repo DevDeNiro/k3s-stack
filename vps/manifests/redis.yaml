@@ -21,8 +21,11 @@ spec:
                 app: redis
                 component: cache
         spec:
+            # Pod Security "restricted" profile (the namespace warns above baseline)
             securityContext:
                 fsGroup: 1000
+                seccompProfile:
+                    type: RuntimeDefault
             containers:
                 -   name: redis
                     image: redis:7-alpine
@@ -68,6 +71,8 @@ spec:
                         runAsNonRoot: true
                         allowPrivilegeEscalation: false
                         readOnlyRootFilesystem: true
+                        capabilities:
+                            drop: ["ALL"]
                     volumeMounts:
                         -   name: tmp
                             mountPath: /tmp

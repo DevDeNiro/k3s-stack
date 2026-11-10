@@ -1,6 +1,6 @@
 # Makefile for K3s Stack Development
 
-.PHONY: help lint helm-test helm-lint helm-template local-install local-deploy-apps local-uninstall
+.PHONY: help lint helm-test helm-lint helm-template local-install local-deploy-app local-uninstall
 
 SHELL_SCRIPTS := $(shell find vps local -type f -name '*.sh' | sort)
 SHELLCHECK_IMAGE := koalaman/shellcheck:stable
@@ -11,7 +11,7 @@ help:
 	@echo ""
 	@echo "  Local (k3d):"
 	@echo "    local-install     - Install local k3d cluster"
-	@echo "    local-deploy-apps - Deploy the reference applications"
+	@echo "    local-deploy-app  - Deploy an application chart (APP=<name>)"
 	@echo "    local-uninstall   - Remove local k3d cluster"
 	@echo ""
 	@echo "  Checks:"
@@ -33,8 +33,9 @@ lint:
 local-install:
 	@./local/install.sh
 
-local-deploy-apps:
-	@./local/deploy-app.sh
+local-deploy-app:
+	@test -n "$(APP)" || { echo "usage: make local-deploy-app APP=<name>"; exit 1; }
+	@./local/deploy-app.sh "$(APP)"
 
 local-uninstall:
 	@./local/uninstall.sh

@@ -82,7 +82,9 @@ spec:
 {{/*
 ==============================================================================
 LEGACY SEALED SECRETS TEMPLATE
-For backward compatibility with coterie-webapp structure
+For charts still using the fixed keys sealedSecrets.ghcr, sealedSecrets.postgresql
+and sealedSecrets.keycloak (one encryptedData value each) instead of the
+dockerRegistry and secrets entries above
 ==============================================================================
 */}}
 

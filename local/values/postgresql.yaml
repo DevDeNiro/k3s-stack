@@ -2,15 +2,9 @@
 # PostgreSQL on the local k3d cluster: differences with the VPS only.
 # local/install.sh layers vps/values/postgresql.yaml (TLS, pg_hba, tuning),
 # this file, then vps/values/postgresql-image.yaml.
+# Superuser only, as on the VPS: local/deploy-app.sh creates the role and the
+# database of each application.
 # =============================================================================
-
-# Local application role and database of coterie-webapp, password from the
-# Secret storage/postgresql-secret created by local/install.sh
-auth:
-  secretKeys:
-    userPasswordKey: password
-  database: "coterie-webapp-local"
-  username: "coterie-webapp-local"
 
 primary:
   resources:

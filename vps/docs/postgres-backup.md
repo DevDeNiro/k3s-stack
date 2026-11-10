@@ -65,7 +65,7 @@ argument de commande. Les objets restaurés appartiennent au rôle de la base.
 
 ```bash
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-DB=coterie-webapp-prod
+DB=my-app-prod
 DUMP=/var/lib/rancher/k3s/storage/<volume>/daily/${DB}_<date>.dump.gz
 PGPW=$(kubectl get secret postgresql-secret -n storage -o jsonpath='{.data.postgres-password}' | base64 -d)
 

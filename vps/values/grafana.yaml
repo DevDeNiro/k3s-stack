@@ -73,7 +73,8 @@ datasources:
         uid: alertmanager
         type: alertmanager
         access: proxy
-        url: http://prometheus-alertmanager.monitoring.svc.cluster.local
+        # The Alertmanager Service listens on 9093 (no port 80)
+        url: http://prometheus-alertmanager.monitoring.svc.cluster.local:9093
         isDefault: false
         editable: false
         jsonData:
@@ -81,8 +82,8 @@ datasources:
 
 # Dashboard sidecar: watches the cluster for ConfigMaps with the label
 # `grafana_dashboard=1` and auto-imports them as Grafana dashboards.
-# This is how application charts (e.g. coterie-webapp) ship their own
-# dashboards without coupling to this monitoring stack.
+# This is how application charts ship their own dashboards without coupling
+# to this monitoring stack.
 sidecar:
   # Shared by the sidecar containers (the dashboard watcher of every namespace
   # uses ~70Mi: a 64Mi limit gets it OOMKilled)
@@ -97,7 +98,7 @@ sidecar:
     enabled: true
     label: grafana_dashboard
     labelValue: "1"
-    # ALL = pick up dashboards from any namespace (e.g. coterie-webapp-prod).
+    # ALL = pick up dashboards from any namespace (e.g. <app>-prod).
     # Restrict if you ever onboard untrusted tenants.
     searchNamespace: ALL
     folder: /tmp/dashboards
@@ -128,8 +129,8 @@ dashboardProviders:
       #     path: /var/lib/grafana/dashboards/myapp
 
 # Pre-configured dashboards from Grafana.com
-# Added 2026-05 after the coterie-webapp-alpha postmortem: we need dashboards
-# focused on pod restarts, container states, and centralized logs.
+# Added 2026-05 after the alpha postmortem (vps/docs/postmortem_2026-05-18_alpha_placeholder_keys.md):
+# we need dashboards focused on pod restarts, container states, and centralized logs.
 dashboards:
   default:
     # Kubernetes cluster monitoring

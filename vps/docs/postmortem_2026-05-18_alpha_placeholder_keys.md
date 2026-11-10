@@ -1,7 +1,7 @@
-# Postmortem - coterie-webapp-alpha placeholder VAPID keys (2026-05-18)
+# Postmortem - placeholder VAPID keys in an alpha environment (2026-05-18)
 
 ## TL;DR
-`coterie-webapp-alpha` had been in **CrashLoopBackOff for 48 consecutive days** (since 2026-03-31), totalling **25 833 container restarts** across two ReplicaSets, without anyone noticing. Root cause: the Helm values file shipped a literal placeholder string `<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>` as the value of `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. Spring Boot's WebPush configuration tried to Base64-decode the placeholder at startup, failed with `IllegalArgumentException: Illegal base64 character 3c`, and the entire application context refused to start. ArgoCD's `selfHeal: true` retried **13 762 times** with no chance of converging because the bug was structural.
+`my-app-alpha` had been in **CrashLoopBackOff for 48 consecutive days** (since 2026-03-31), totalling **25 833 container restarts** across two ReplicaSets, without anyone noticing. Root cause: the Helm values file shipped a literal placeholder string `<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>` as the value of `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. Spring Boot's WebPush configuration tried to Base64-decode the placeholder at startup, failed with `IllegalArgumentException: Illegal base64 character 3c`, and the entire application context refused to start. ArgoCD's `selfHeal: true` retried **13 762 times** with no chance of converging because the bug was structural.
 
 ## Facts
 | Field              | Value                                                                                                                    |
@@ -9,24 +9,24 @@
 | Incident date      | 2026-03-31 11:21:13 UTC -> 2026-05-18 (ongoing at investigation)                                                         |
 | Detection date     | 2026-05-18 (manual operator inquiry; no alert ever fired)                                                                |
 | Severity           | High (alpha environment, but 0% availability for 48 days)                                                                |
-| Component(s)       | `coterie-webapp-alpha` (k8s ns), `coterie-webapp` ArgoCD Application, Helm chart `helm/coterie-webapp/values-alpha.yaml` |
+| Component(s)       | `my-app-alpha` (k8s ns), `my-app` ArgoCD Application, Helm chart `helm/my-app/values-alpha.yaml` |
 | Detection source   | Manual SSH investigation                                                                                                 |
-| User-facing impact | `alpha.macoterie.fr` returned 5xx (no upstream pod ready) since 2026-03-31                                               |
+| User-facing impact | `alpha.example.com` returned 5xx (no upstream pod ready) since 2026-03-31                                               |
 
 ## Timeline (UTC)
 - ~2026-03-30 - PR introducing Web Push merged into `develop`. `values-alpha.yaml` ships `VAPID_PUBLIC_KEY: "<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>"` and a matching private-key placeholder.
-- 2026-03-31 11:21:13 - ArgoCD syncs revision `f3dd5cd`, creates ReplicaSet `coterie-webapp-alpha-646cbd766b`. First container starts.
+- 2026-03-31 11:21:13 - ArgoCD syncs revision `f3dd5cd`, creates ReplicaSet `my-app-alpha-646cbd766b`. First container starts.
 - 2026-03-31 11:22:xx - First crash: `Caused by: java.lang.IllegalArgumentException: Illegal base64 character 3c` during Spring context refresh. Pod exits with code 1.
 - 2026-03-31 -> 2026-05-18 - K8s kubelet restarts the container every ~80 s. ArgoCD `selfHeal` retries the sync (13 762 attempts logged).
 - 2026-05-18 11:53:23 - Last observed crash captured in `--previous` logs at the time of investigation.
 - 2026-05-18 11:58:30 - Diagnostic script runs on VPS via SSH; archive packaged.
 - 2026-05-18 12:10 - Root cause identified from `--previous` stack trace.
-- 2026-05-18 - Fix prepared in `helm/coterie-webapp/values-alpha.yaml` (remove placeholder env vars).
+- 2026-05-18 - Fix prepared in `helm/my-app/values-alpha.yaml` (remove placeholder env vars).
 
 ## Root cause
 Two contributors:
 
-1. **Helm values mistake** - `helm/coterie-webapp/values-alpha.yaml:107-110` shipped:
+1. **Helm values mistake** - `helm/my-app/values-alpha.yaml:107-110` shipped:
    ```yaml
    - name: VAPID_PUBLIC_KEY
      value: "<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>"
@@ -50,7 +50,7 @@ org.springframework.beans.factory.UnsatisfiedDependencyException: Error creating
 Caused by: java.lang.IllegalArgumentException: Illegal base64 character 3c
     at java.base/java.util.Base64$Decoder.decode0(...)
     at nl.martijndwars.webpush.Utils.loadPublicKey(Utils.java:49)
-    at com.coterie.infrastructure.configuration.WebPushConfiguration
+    at com.example.infrastructure.configuration.WebPushConfiguration
         .webPushDeliveryAdapter(WebPushConfiguration.kt:50)
 ```
 
@@ -68,8 +68,8 @@ status:
 
 Pod state (one of two ReplicaSets):
 ```
-coterie-webapp-alpha-577dc97865-jc9t5  0/1  Running  15123 (6m34s ago)  68d
-coterie-webapp-alpha-646cbd766b-kx9gp  0/1  CrashLoopBackOff  10710 (3m45s ago)  48d
+my-app-alpha-577dc97865-jc9t5  0/1  Running  15123 (6m34s ago)  68d
+my-app-alpha-646cbd766b-kx9gp  0/1  CrashLoopBackOff  10710 (3m45s ago)  48d
 ```
 
 ## Why didn't we catch it earlier
@@ -80,8 +80,8 @@ coterie-webapp-alpha-646cbd766b-kx9gp  0/1  CrashLoopBackOff  10710 (3m45s ago) 
 5. **ArgoCD's auto-heal masked the symptom** - because the sync technically "succeeded" at the API level (resources applied), no visible "failed sync" alert was raised. The failure was at the runtime (pod) layer, not the desired-state-vs-live-state layer.
 
 ## Resolution
-1. `helm/coterie-webapp/values-alpha.yaml` - removed the placeholder env vars (kept a comment explaining the trade-off and how to enable WebPush in alpha later via SealedSecret, mirroring prod).
-2. `coterie-infrastructure/.../WebPushProperties.kt` - hardened `isConfigured()` to detect placeholder patterns (`<...>`, `${...}`, literal `TODO`/`CHANGEME`/`REPLACE_ME`). Added unit tests including a regression test for this exact incident.
+1. `helm/my-app/values-alpha.yaml` - removed the placeholder env vars (kept a comment explaining the trade-off and how to enable WebPush in alpha later via SealedSecret, mirroring prod).
+2. `infrastructure/.../WebPushProperties.kt` - hardened `isConfigured()` to detect placeholder patterns (`<...>`, `${...}`, literal `TODO`/`CHANGEME`/`REPLACE_ME`). Added unit tests including a regression test for this exact incident.
 3. `vps/values/prometheus.yaml` - enabled Alertmanager and added 9 pod/node alerting rules covering the conditions we missed.
 4. `vps/values/loki.yaml` + `vps/values/promtail.yaml` - deployed centralized log aggregation so `--previous` logs survive pod recycling.
 5. `vps/values/grafana.yaml` - added Loki datasource and 4 new dashboards focused on pod restarts and log exploration.
@@ -96,7 +96,7 @@ coterie-webapp-alpha-646cbd766b-kx9gp  0/1  CrashLoopBackOff  10710 (3m45s ago) 
 - [x] Document observability stack and crash runbook (owner: k3s-stack, status: done, 2026-05-18)
 - [ ] Configure Discord webhook receiver in Alertmanager (owner: operator, due: next session)
 - [ ] Audit all `helm/*/values-*.yaml` files for remaining `<PLACEHOLDER>` strings (owner: code, due: next session)
-- [ ] Investigate why `coterie-webapp-prod` is in `Missing` state (owner: operator, due: next session)
+- [ ] Investigate why `my-app-prod` is in `Missing` state (owner: operator, due: next session)
 - [ ] Consider an ArgoCD `selfHeal` circuit-breaker after N attempts (owner: k3s-stack, due: backlog)
 - [ ] Plan K3s + Gateway API upgrade (currently v1.29.0+k3s1 / v1.2.0, latest are v1.36.0+k3s1 / v1.5.1) (owner: k3s-stack, due: backlog)
 

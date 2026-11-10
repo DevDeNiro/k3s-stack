@@ -2,7 +2,7 @@
 # Loki SingleBinary Configuration for VPS (4-6GB RAM)
 # Lightweight log aggregation - one pod, filesystem storage, 7-day retention.
 # Solves the "logs --previous disappears once pod is pruned" problem documented
-# in postmortem_2026-05-18_coterie_alpha_vapid.md.
+# in vps/docs/postmortem_2026-05-18_alpha_placeholder_keys.md.
 # =============================================================================
 
 # Deployment mode: single binary (vs distributed simple-scalable or microservices).

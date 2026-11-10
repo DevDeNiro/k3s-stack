@@ -23,6 +23,17 @@ nginxGateway:
 nginx:
   kind: deployment
   replicas: 1
+  # hostPorts on a single node: the old pod stops before the new one starts
+  # (vps/values/nginx-gateway-fabric.yaml)
+  patches:
+    - type: StrategicMerge
+      value:
+        spec:
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 0
+              maxUnavailable: 1
   container:
     hostPorts:
       - port: 80

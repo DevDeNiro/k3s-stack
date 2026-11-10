@@ -219,7 +219,7 @@ running applications with ArgoCD GitOps.
 For a production-only onboarding:
 
 ```bash
-sudo ./vps/scripts/onboard-app.sh coterie-webapp --environment prod
+sudo ./vps/scripts/onboard-app.sh my-app --environment prod
 ```
 
 The script preserves a known PostgreSQL password and refuses to rotate an existing account when its password is
@@ -254,7 +254,7 @@ unavailable or inconsistent. Do not rerun the broad `all` scope for a single-env
                    │  using kubeseal:     │
                    │  - PostgreSQL password│
                    │  - keycloak client   │
-                   │  - Turnstile/VAPID   │
+                   │  - application keys  │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -268,19 +268,19 @@ unavailable or inconsistent. Do not rerun the broad `all` scope for a single-env
 **Note:** `ghcr-secret` is NOT a SealedSecret - it's created by `onboard-app.sh` to avoid chicken-and-egg issues with
 PreSync hooks.
 
-For Coterie's production application keys, run this from the `coterie-webapp` checkout. The script prompts without
-echoing the values and writes only encrypted values:
+Seal each production value from the application repository, typed without echo and never passed as a command
+argument (`kubeseal --raw` prints only the encrypted value, bound to the namespace and Secret name):
 
 ```bash
-./scripts/seal-secrets.sh application coterie-webapp-prod \
-    --cert ~/.k3s-secrets/sealed-secrets-pub.pem \
-    --output /tmp/coterie-webapp-prod-sealed-values.yaml
+read -r -s -p "Value: " VALUE; echo
+printf '%s' "$VALUE" | kubeseal --raw --cert ~/.k3s-secrets/sealed-secrets-pub.pem \
+    --namespace my-app-prod --name my-app-secrets --from-file=/dev/stdin
+unset VALUE
 ```
 
-Merge the generated `sealedSecrets.application` block into
-`helm/coterie-webapp/values-prod.yaml`. Do not put raw Turnstile or VAPID values in Git or chat.
-If onboarding created a new database password, seal that exact password with the hidden prompt and update the
-`sealedSecrets.postgresql.encryptedData` value before allowing ArgoCD to sync.
+Copy the encrypted values into `helm/<app>/values-prod.yaml`. Never put raw application keys in Git or chat.
+If onboarding created a new database password, seal that exact password the same way and update the
+corresponding `encryptedData` value before allowing Argo CD to sync.
 
 ### Phase 6: ArgoCD Application Deployment
 
@@ -461,6 +461,19 @@ metadata:
 | `setup-remote.sh`      | Workstation kubeconfig through an SSH tunnel    |
 
 Parameters of every script: [`../README.md`](../README.md).
+
+### Example applications
+
+Two public repositories illustrate the two common kinds of applications:
+
+- [DevDeNiro/coterie-webapp-alpha](https://github.com/DevDeNiro/coterie-webapp-alpha): server-side monolith
+  (Spring Boot / Kotlin rendering its templates) using PostgreSQL and Keycloak;
+- [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit): client application (React / Vite
+  build served by nginx), without database (`onboard-app.sh <app> --skip-database`).
+
+The auto-discovery deploys a repository once it follows the layout below: a chart in `helm/<repository>/` with
+`values-alpha.yaml` and `values-prod.yaml`, `develop` and `main` branches, images tagged `develop-<sha>` and
+`main-<sha>`.
 
 ### Application Helm Chart (`helm/<app>/`)
 

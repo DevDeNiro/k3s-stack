@@ -80,11 +80,10 @@ check_system() {
 
 install_dependencies() {
     step "Installing dependencies"
-    apt-get update -qq
+    apt_update
     # gettext-base: envsubst (templates), apache2-utils: htpasswd (Argo CD password hash),
     # iptables before K3s: K3s, flannel and UFW must write to the same iptables backend
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        curl git jq openssl ca-certificates gettext-base apache2-utils iptables
+    apt_install curl git jq openssl ca-certificates gettext-base apache2-utils iptables
     ok "Dependencies installed"
 }
 
@@ -342,7 +341,8 @@ apply_network_policies() {
 # -----------------------------------------------------------------------------
 print_summary() {
     local external_ip
-    external_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+    # IPv4: the address of the DNS A records (ifconfig.me answers in IPv6 when available)
+    external_ip=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
     banner "Installation complete"
     kubectl get pods -A

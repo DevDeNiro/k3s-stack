@@ -11,7 +11,7 @@ shared with the VPS.
 ```mermaid
 flowchart TB
     subgraph Client["Workstation"]
-        Browser["Browser\n(http://coterie.local, http://auth.localhost)"]
+        Browser["Browser\n(application hostname, http://auth.localhost)"]
         KubeCli["kubectl / helm / k9s\n(context: k3d-dev-cluster)"]
     end
 
@@ -20,11 +20,10 @@ flowchart TB
             IGW["Gateway infrastructure-gateway\n(NGINX Gateway Fabric, 127.0.0.1:80/443)"]
         end
 
-        subgraph NS_App["coterie-webapp-local"]
-            RouteCoterie["HTTPRoute coterie-webapp\n(host: coterie.local)"]
-            PodCoterie["coterie-webapp\n(Spring Boot WebFlux / Kotlin)"]
-            SecDB["Secret coterie-webapp-db"]
-            SecKC["Secret keycloak-client"]
+        subgraph NS_App["my-app-local"]
+            RouteApp["HTTPRoute of the application chart"]
+            PodApp["application pods"]
+            SecDB["Secret my-app-db"]
         end
 
         subgraph NS_Infra["Infrastructure namespaces"]
@@ -37,13 +36,12 @@ flowchart TB
     end
 
     Browser -->|80/443| IGW
-    IGW --> RouteCoterie --> PodCoterie
+    IGW --> RouteApp --> PodApp
     IGW -->|/realms, /resources| KC
-    PodCoterie -.->|R2DBC| PG
-    PodCoterie -.->|cache, sessions| Redis
-    PodCoterie -.->|OIDC| KC
-    SecDB -.-> PodCoterie
-    SecKC -.-> PodCoterie
+    PodApp -.->|SQL over TLS| PG
+    PodApp -.->|cache, sessions| Redis
+    PodApp -.->|OIDC| KC
+    SecDB -.-> PodApp
 ```
 
 ## Prerequisites
@@ -63,11 +61,11 @@ The scripts run with the bash 3.2 of macOS.
 ```bash
 ./local/install.sh                  # Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets
 ./local/install.sh --all            # plus Keycloak and Prometheus/Grafana
-./local/deploy-app.sh               # coterie-webapp on http://coterie.local
+./local/deploy-app.sh my-app        # chart ../my-app/helm/my-app with its values-local.yaml
 ./local/uninstall.sh                # delete everything
 ```
 
-Makefile shortcuts: `make local-install`, `make local-deploy-apps`, `make local-uninstall`.
+Makefile shortcuts: `make local-install`, `make local-deploy-app APP=my-app`, `make local-uninstall`.
 
 ## Scripts
 
@@ -96,16 +94,28 @@ Version overrides work as on the VPS: `K3S_VERSION=... ./local/install.sh --recr
 ### `deploy-app.sh`
 
 ```text
-./local/deploy-app.sh
+./local/deploy-app.sh <app-name> [--chart DIR] [--values FILE] [--skip-database]
 ```
 
-Deploys `../coterie-webapp/helm/coterie-webapp` with `values-local.yaml`: PostgreSQL role
-and database `coterie-webapp-local`, Secrets `coterie-webapp-db` and `keycloak-client`,
-then the Helm release. The image is pulled from GHCR: create the Secret `ghcr-secret` in
-`coterie-webapp-local` first
-(`kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io ...`), or point
-`values-local.yaml` to a local image loaded with `k3d image import`. Add
-`127.0.0.1 coterie.local` to `/etc/hosts`.
+Deploys the Helm chart of any application in the namespace `<app>-local`, the local
+counterpart of `vps/scripts/onboard-app.sh` followed by the Argo CD sync:
+
+- PostgreSQL role and database `<app>-local`, and the Secret `<app>-db` with the keys of the
+  VPS onboarding (`host`, `port`, `database`, `username`, `password`, `url`, `r2dbc-url`);
+- `helm upgrade --install <app>` with the local values file.
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `--chart DIR` | `../<app>/helm/<app>` (checkout next to this repository) | chart to deploy |
+| `--values FILE` | `<chart>/values-local.yaml` | values file |
+| `--skip-database` | - | no role, database or `<app>-db` Secret (static client served by nginx) |
+
+Application-specific Secrets (OIDC client, API keys) come from the application chart. A
+private image is pulled with a Secret `ghcr-secret` created in `<app>-local` beforehand
+(`kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io ...`); a local
+image is loaded with `k3d image import`. The script prints the hostnames of the
+application HTTPRoutes: add them to `/etc/hosts` (`127.0.0.1 <hostname>`), except
+`*.localhost`.
 
 ### `uninstall.sh`
 
@@ -141,7 +151,8 @@ Apple Silicon (`local/values/prometheus.yaml`).
 
 | File | Content |
 |------|---------|
-| `local/postgres_password.txt` | PostgreSQL superuser, `coterie-webapp-local` and `keycloak` roles |
+| `local/postgres_password.txt` | PostgreSQL superuser and `keycloak` role |
+| `local/<app>_db_password.txt` | role `<app>-local` of an application (`deploy-app.sh`) |
 | `local/keycloak_password.txt` | Keycloak `admin` user |
 | `local/argocd_password.txt` | Argo CD `admin` user |
 | `local/secrets/sealed-secrets-pub.pem` | public certificate of the **local** cluster |
