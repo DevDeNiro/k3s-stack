@@ -309,7 +309,10 @@ alias kpf='kubectl port-forward'
 Référence complète des paramètres : [`../README.md`](../README.md).
 
 ```bash
-# Accès aux dépôts de toutes les organisations pour Argo CD (token classique saisi sans écho)
+# Jeton de lecture des images (copié dans chaque namespace applicative, saisi sans écho)
+sudo ./vps/scripts/export-secrets.sh set-registry-credentials
+
+# Accès aux dépôts de toutes les organisations pour Argo CD (namespace argocd seulement)
 sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
 
 # Voir les credentials
@@ -320,15 +323,17 @@ sudo ./vps/scripts/export-secrets.sh show <postgres|keycloak|grafana|argocd|offs
 sudo ./vps/scripts/export-secrets.sh export-cert ~/sealed-secrets-pub.pem
 sudo ./vps/scripts/export-secrets.sh backup-sealing-key
 
-# Onboarder une application (dépôt d'une autre organisation : --organization)
+# Onboarder une application (dépôt d'une autre organisation : --organization) ;
+# relancer est sans risque : templates à jour, mots de passe conservés
 sudo ./vps/scripts/onboard-app.sh <app-name> [--organization <org>]
+kubectl get appprojects -n argocd
 
 # Gateway, certificats, routes et limite de débit Keycloak (après modification de
-# GATEWAY_HOSTNAMES, AUTH_HOSTNAMES ou KEYCLOAK_RATE_LIMIT_*)
+# GATEWAY_HOSTNAMES <hostname>=<namespace>, AUTH_HOSTNAMES ou KEYCLOAK_RATE_LIMIT_*)
 sudo ./vps/scripts/setup-gateway-api.sh --staging
 sudo ./vps/scripts/setup-gateway-api.sh
 
-# ApplicationSets et Image Updater (après modification de config.env)
+# ApplicationSets, Image Updater et projet default vidé (après modification de config.env)
 sudo ./vps/scripts/apply-config.sh
 
 # Keycloak et ses images d'extension (après modification de KEYCLOAK_EXTENSION_IMAGES)

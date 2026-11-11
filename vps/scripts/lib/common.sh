@@ -43,8 +43,14 @@ DEFAULT_REGISTRY_HOST="ghcr.io"
 DEFAULT_KEYCLOAK_RATE_LIMIT_RATE="10r/s"
 DEFAULT_KEYCLOAK_RATE_LIMIT_BURST="20"
 
-# Image pull Secret of the Keycloak extension images (namespace security,
-# created by export-secrets.sh set-scm-credentials github)
+# Image pull Secrets, all holding the read-only registry token of
+# export-secrets.sh set-registry-credentials, never the repository token:
+#   - argocd/<REGISTRY_PULL_SECRET>: Argo CD Image Updater
+#     (values/argocd-image-updater.yaml), copied by onboard-app.sh
+#   - <APP_PULL_SECRET> of each application namespace, referenced by the charts
+#   - security/<KEYCLOAK_PULL_SECRET>: private Keycloak extension images
+REGISTRY_PULL_SECRET="ghcr-registry-secret"
+APP_PULL_SECRET="ghcr-secret"
 KEYCLOAK_PULL_SECRET="ghcr-secret"
 
 # Credentials of the off-site backup copy (namespace storage, created by
@@ -180,15 +186,57 @@ validate_hostnames() {
     done
 }
 
+# GATEWAY_HOSTNAMES lists <hostname>=<namespace>[,<namespace>...] entries: the
+# namespaces whose HTTPRoutes may attach to the HTTPS listener of the hostname.
+
+# gateway_hosts: the hostnames of GATEWAY_HOSTNAMES, one per line
+gateway_hosts() {
+    local entry
+    for entry in ${GATEWAY_HOSTNAMES:-}; do
+        echo "${entry%%=*}"
+    done
+}
+
+# gateway_host_namespaces <hostname>: namespaces allowed to route it, space-separated
+gateway_host_namespaces() {
+    local entry
+    for entry in ${GATEWAY_HOSTNAMES:-}; do
+        if [ "${entry%%=*}" = "$1" ]; then
+            echo "${entry#*=}" | tr ',' ' '
+            return 0
+        fi
+    done
+}
+
 # validate_gateway_config: GATEWAY_HOSTNAMES and AUTH_HOSTNAMES of config.env
 validate_gateway_config() {
-    local host
-    validate_hostnames GATEWAY_HOSTNAMES
+    local entry host namespace hosts="" owners
+    for entry in ${GATEWAY_HOSTNAMES:-}; do
+        case "$entry" in
+            ?*=?*) ;;
+            *) die "GATEWAY_HOSTNAMES: '$entry' has no namespace: write <hostname>=<namespace>, the namespace allowed to route it (<app>-<env>, or security for Keycloak)" ;;
+        esac
+        host="${entry%%=*}"
+        echo "$host" | grep -Eq '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$' \
+            || die "GATEWAY_HOSTNAMES: '$host' is not a valid lowercase hostname"
+        # shellcheck disable=SC2086  # word splitting of the hostname list
+        if list_contains "$host" $hosts; then
+            die "GATEWAY_HOSTNAMES: '$host' is listed twice"
+        fi
+        hosts="$hosts $host"
+        for namespace in $(gateway_host_namespaces "$host"); do
+            echo "$namespace" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' \
+                || die "GATEWAY_HOSTNAMES: '$namespace' (hostname $host) is not a valid namespace name"
+        done
+    done
     validate_hostnames AUTH_HOSTNAMES
     for host in ${AUTH_HOSTNAMES:-}; do
         # shellcheck disable=SC2086  # word splitting of the hostname list
-        list_contains "$host" ${GATEWAY_HOSTNAMES:-} \
-            || die "AUTH_HOSTNAMES: $host is missing from GATEWAY_HOSTNAMES"
+        list_contains "$host" $hosts \
+            || die "AUTH_HOSTNAMES: $host is missing from GATEWAY_HOSTNAMES ($host=security)"
+        owners=$(gateway_host_namespaces "$host")
+        [ "$owners" = "security" ] \
+            || die "AUTH_HOSTNAMES: $host belongs to the namespace of Keycloak: $host=security in GATEWAY_HOSTNAMES, not $host=${owners// /,}"
     done
 }
 
@@ -418,16 +466,23 @@ apply_secret() {
         | kubectl apply -f - >/dev/null
 }
 
+# apply_dockerconfig_secret <namespace> <name> <dockerconfigjson>: image pull
+# Secret holding the given .dockerconfigjson (passed on a file descriptor)
+apply_dockerconfig_secret() {
+    kubectl create secret generic "$2" --namespace "$1" \
+        --type=kubernetes.io/dockerconfigjson \
+        --from-file=.dockerconfigjson=<(printf '%s' "$3") \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
 # apply_registry_secret <namespace> <name> <server> <username> <token>: image pull
 # Secret rendered from templates/secrets/dockerconfig.json.tpl
 apply_registry_secret() {
-    local namespace="$1" name="$2" auth
+    local auth
     auth=$(printf '%s:%s' "$4" "$5" | base64 | tr -d '\n')
-    kubectl create secret generic "$name" --namespace "$namespace" \
-        --type=kubernetes.io/dockerconfigjson \
-        --from-file=.dockerconfigjson=<(render_template "$VPS_TEMPLATES_DIR/secrets/dockerconfig.json.tpl" \
-            "REGISTRY_SERVER=$3" "REGISTRY_USERNAME=$4" "REGISTRY_AUTH=$auth") \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    apply_dockerconfig_secret "$1" "$2" \
+        "$(render_template "$VPS_TEMPLATES_DIR/secrets/dockerconfig.json.tpl" \
+            "REGISTRY_SERVER=$3" "REGISTRY_USERNAME=$4" "REGISTRY_AUTH=$auth")"
 }
 
 # -----------------------------------------------------------------------------

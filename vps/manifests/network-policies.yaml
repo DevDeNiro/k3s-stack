@@ -7,6 +7,9 @@
 # Pods using hostNetwork (node-exporter) and the Kubernetes API (port 6443 of the
 # node, behind the Service 10.43.0.1:443) are not matched by namespaceSelector:
 # they are reached through ipBlock rules.
+# Policies add up: a pod selected by several policies accepts the union of their
+# sources. The application namespaces get their default policy from
+# onboard-app.sh (templates/onboarding/namespace.yaml.tpl).
 # =============================================================================
 
 ---
@@ -61,52 +64,6 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-  egress:
-    # Allow DNS
-    - to:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
-
----
-# =============================================================================
-# Database namespace - Redis
-# =============================================================================
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: redis-policy
-  namespace: database
-spec:
-  podSelector:
-    matchLabels:
-      app: redis
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    # Allow from application namespaces (pattern: *-prod, *-alpha)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              app.kubernetes.io/managed-by: k3s-stack
-      ports:
-        - protocol: TCP
-          port: 6379
-    # Allow from monitoring (metrics scraping, if enabled)
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitoring
-      ports:
-        - protocol: TCP
-          port: 6379
   egress:
     # Allow DNS
     - to:
@@ -211,8 +168,27 @@ spec:
 
 ---
 # =============================================================================
-# Monitoring namespace - Prometheus & Grafana
+# Monitoring namespace
 # =============================================================================
+# Every pod (Loki, Alertmanager, kube-state-metrics...) only accepts connections
+# from the namespace itself: Loki answers queries on the logs of every namespace
+# without authentication, Alertmanager accepts silences. Prometheus scrapes the
+# other namespaces outbound; the UIs go through kubectl port-forward, which is
+# not subject to NetworkPolicies. Adds up with the two policies below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: same-namespace-only
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -268,8 +244,9 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  # No ingress: Grafana is reached through kubectl port-forward, which enters the
-  # pod network namespace and is not subject to NetworkPolicies
+  # No other source than the namespace (same-namespace-only): Grafana is reached
+  # through kubectl port-forward, which enters the pod network namespace and is
+  # not subject to NetworkPolicies
   ingress: []
   egress:
     # Datasources: Prometheus, Loki, Alertmanager
@@ -329,6 +306,23 @@ spec:
 # =============================================================================
 # ArgoCD namespace
 # =============================================================================
+# Every pod (repo-server, redis, controllers) only accepts connections from the
+# namespace itself: the applications never reach the internals of Argo CD.
+# Adds up with the policy of the server below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: same-namespace-only
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -340,6 +334,7 @@ spec:
       app.kubernetes.io/name: argocd-server
   policyTypes:
     - Ingress
-  # No ingress: the Argo CD UI and CLI go through kubectl port-forward, which
-  # enters the pod network namespace and is not subject to NetworkPolicies
+  # No other source than the namespace (same-namespace-only): the Argo CD UI and
+  # CLI go through kubectl port-forward, which enters the pod network namespace
+  # and is not subject to NetworkPolicies
   ingress: []

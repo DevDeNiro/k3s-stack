@@ -31,14 +31,15 @@ RELEASES=(
     cert-manager:cert-manager
     nginx-gateway:nginx-gateway
 )
+# database: shared Redis of earlier versions (Redis now belongs to the applications)
 INFRA_NAMESPACES=(storage security monitoring database argocd cert-manager nginx-gateway)
 
 usage() {
     printf '%s\n' \
         "Usage: sudo $0 [--all] [--k3s] [--helm] [--keep-secrets] [--force]" \
         "" \
-        "Without option: removes the platform (Helm releases, Keycloak, Redis, Gateway," \
-        "ClusterIssuers, CoreDNS hairpin, application and infrastructure namespaces)" \
+        "Without option: removes the platform (Helm releases, Keycloak, Gateway, Argo CD" \
+        "projects, ClusterIssuers, CoreDNS hairpin, application and infrastructure namespaces)" \
         "and keeps K3s running." \
         "" \
         "  --k3s           uninstall K3s itself: datastore, /etc/rancher/k3s, every workload" \
@@ -85,7 +86,7 @@ confirm_uninstall() {
         fi
     else
         echo -e "  - Helm releases: ${RELEASES[*]%%:*}"
-        echo -e "  - Keycloak, Redis, ClusterIssuers, CoreDNS hairpin (coredns-custom)"
+        echo -e "  - Keycloak, ClusterIssuers, CoreDNS hairpin (coredns-custom)"
         echo -e "  - namespaces: ${INFRA_NAMESPACES[*]} $(app_namespaces | tr '\n' ' ')"
     fi
     echo -e "  - ${RED}the PostgreSQL data and its local dumps (volumes of the namespace storage)${NC}"
@@ -124,7 +125,6 @@ remove_platform() {
     # Resource names only: the manifest is rendered without extension image
     # shellcheck disable=SC2119
     render_keycloak_manifest | kubectl delete -f - --ignore-not-found --timeout=120s
-    kubectl delete -f "$VPS_MANIFESTS_DIR/redis.yaml" --ignore-not-found --timeout=60s
     kubectl delete clusterissuers letsencrypt-staging letsencrypt-prod --ignore-not-found 2>/dev/null || true
     kubectl delete configmap coredns-custom -n kube-system --ignore-not-found
 

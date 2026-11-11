@@ -1,0 +1,24 @@
+# =============================================================================
+# Argo CD project "default", emptied (Argo CD documentation, "The Default
+# Project"). Applied by vps/scripts/apply-config.sh.
+#
+# Every Application belongs to the AppProject of its application, created by
+# onboard-app.sh (templates/onboarding/appproject.yaml.tpl). An Application left
+# in "default" (repository not onboarded, manual creation) is refused instead of
+# deploying anything anywhere. The empty lists are explicit: kubectl apply
+# replaces the permissive lists of the project created by Argo CD.
+# =============================================================================
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  sourceRepos: []
+  sourceNamespaces: []
+  destinations: []
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: "*"
+      kind: "*"

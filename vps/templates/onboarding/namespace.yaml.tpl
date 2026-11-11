@@ -1,8 +1,9 @@
 # =============================================================================
 # Application namespace <app>-<env> - rendered and applied by vps/scripts/onboard-app.sh
 # Sizing and Pod Security level: vps/config/onboarding/<env>.env
-# The label app.kubernetes.io/managed-by=k3s-stack grants access to PostgreSQL,
-# Redis and Keycloak (vps/manifests/network-policies.yaml).
+# The label app.kubernetes.io/managed-by=k3s-stack grants access to PostgreSQL
+# and Keycloak (vps/manifests/network-policies.yaml). The applications cannot
+# change it: their AppProject allows no cluster-scoped resource.
 # =============================================================================
 ---
 apiVersion: v1
@@ -45,3 +46,27 @@ spec:
       defaultRequest:
         cpu: "100m"
         memory: "128Mi"
+---
+# Isolation by default: the pods of the namespace only accept connections from
+# the namespace itself, the gateway data plane (public traffic) and the namespace
+# monitoring (Prometheus). NetworkPolicies add up: the policies of a chart can
+# only allow more sources (another namespace, by explicit choice). Keycloak
+# calls an application (back-channel logout) through its public URL.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: k3s-stack-default-ingress
+  namespace: ${NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: nginx-gateway
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring

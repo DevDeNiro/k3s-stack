@@ -32,18 +32,41 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
 - **Pod Security Admission** par namespace : `baseline` pour l'infrastructure ;
   `privileged` seulement pour `nginx-gateway` (hostPorts 80/443) et `monitoring`
   (node-exporter, Promtail), avec audit et avertissements au niveau `baseline`. Côté
-  applications : `baseline` en alpha, `restricted` en prod (`config/onboarding/`).
+  applications : `restricted` en alpha comme en prod (`config/onboarding/`) : l'alpha suit
+  `develop` automatiquement et partage le nœud avec la prod (`baseline` laisserait la
+  capacité NET_RAW aux conteneurs root).
 - **NetworkPolicies** (`manifests/network-policies.yaml`) :
   - PostgreSQL est joignable uniquement depuis Keycloak, les namespaces applicatifs
     (label `app.kubernetes.io/managed-by=k3s-stack`) et les CronJobs de sauvegarde ;
-  - Redis et Keycloak sont restreints de la même façon ; Keycloak ne sort que vers
-    PostgreSQL, le DNS, le HTTPS (fournisseurs d'identité OIDC) et le SMTP 587/465 (emails
-    du realm via un relais), ces deux derniers vers les adresses publiques uniquement ;
-  - Grafana et le serveur Argo CD n'acceptent aucune connexion entrante (accès par
-    port-forward uniquement).
+  - Keycloak est restreint de la même façon ; il ne sort que vers PostgreSQL, le DNS, le
+    HTTPS (fournisseurs d'identité OIDC) et le SMTP 587/465 (emails du realm via un
+    relais), ces deux derniers vers les adresses publiques uniquement ;
+  - chaque namespace applicative reçoit à l'onboarding la policy
+    `k3s-stack-default-ingress` : seuls ses propres pods, la passerelle et Prometheus
+    ouvrent des connexions vers ses pods ;
+  - `monitoring` et `argocd` n'acceptent que leurs propres pods : Loki répond sans
+    authentification sur les journaux de toutes les namespaces, Alertmanager accepte des
+    silences, et les composants internes d'Argo CD n'ont pas à être joints par les
+    applications. Grafana et le serveur Argo CD restent accessibles par port-forward
+    uniquement.
   - La NetworkPolicy du chart PostgreSQL est désactivée : elle ouvrait le port 5432 à
     tous les pods du cluster, et les règles s'additionnent.
 - **Quotas et limites par défaut** dans chaque namespace applicatif.
+
+### Cloisonnement des applications
+
+Une application est une frontière de confiance : quiconque peut pousser sur sa branche
+`develop` contrôle ce que ses namespaces exécutent. Rien de ce qu'il pousse ne doit
+atteindre une autre application ni la plateforme.
+
+| Mesure | Détail | Fichier |
+|--------|--------|---------|
+| AppProject par application | sources : son seul dépôt ; destinations : `<app>-alpha` et `<app>-prod` (Argo CD vérifie la namespace de chaque ressource) ; aucune ressource de niveau cluster ; `ResourceQuota`, `LimitRange`, `Endpoints` et `EndpointSlice` refusés (un Service ferait suivre la passerelle vers les pods d'une autre namespace) | `templates/onboarding/appproject.yaml.tpl` |
+| Pas d'onboarding, pas de déploiement | Argo CD ne crée ni namespace (plus de `CreateNamespace`) ni projet : un dépôt non onboardé n'a pas d'Application ; le projet `default` est vidé | `templates/argocd/applicationsets.yaml.tpl`, `manifests/argocd-default-project.yaml` |
+| Propriétaire de chaque hostname | le listener HTTPS d'un hostname n'accepte que les routes des namespaces déclarées dans `GATEWAY_HOSTNAMES` (`<hostname>=<namespace>`, étiquette `kubernetes.io/metadata.name` posée par l'API) ; le listener HTTP ne sert que la redirection et les défis ACME (`Same`) | `templates/gateway/` |
+| Deux jetons | le jeton des dépôts reste dans `argocd` ; le jeton copié dans les namespaces applicatives est en lecture des images seulement (`read:packages`) | `scripts/export-secrets.sh` |
+| Pas de service partagé sans cloisonnement | PostgreSQL (rôles, bases fermées aux autres rôles) et Keycloak (realms) sont partagés ; un cache Redis vit dans le chart de l'application | `sql/ensure-role-database.sql` |
+| Aucun jeton de cluster distribué | l'option `--with-cicd` (compte de service administrateur de la namespace, jeton sans expiration) est supprimée : Argo CD tire les déploiements | `scripts/onboard-app.sh` |
 
 ### Secrets
 
@@ -69,6 +92,7 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
 | TLS effectif | sans `pg_hba` explicite, l'image Bitnami exige un certificat client en TLS et les clients retombent en clair ; `ssl_groups` est adapté à l'OpenSSL de l'image (sinon PostgreSQL 18 refuse de démarrer) |
 | Clients en TLS | Keycloak en `sslmode=require` ; les URLs `url` et `r2dbc-url` des Secrets `<app>-db` exigent TLS |
 | Rôle et base dédiés par application | aucun mot de passe existant n'est modifié sans être connu |
+| Bases fermées aux autres rôles | `REVOKE ALL ON DATABASE ... FROM PUBLIC` : PostgreSQL accorde `CONNECT` et `TEMPORARY` à tous les rôles par défaut ; seul le propriétaire se connecte (le superutilisateur n'est pas concerné) |
 | Image épinglée par digest | `values/postgresql-image.yaml` : un re-pull ne peut pas changer de version majeure ; les sauvegardes utilisent la même image |
 
 ### Exposition publique
@@ -130,6 +154,17 @@ complète côté application. Loki conserve 7 jours de journaux déjà masqués.
   public.
 - L'image PostgreSQL Bitnami n'est publiée qu'en `latest` : le digest épinglé doit être
   mis à jour délibérément (commentaire de `values/postgresql-image.yaml`).
+- Keycloak (port 8080, API d'administration comprise) reste joignable depuis les
+  namespaces applicatives : une application gère les utilisateurs de son realm avec un
+  compte de service de ce realm. Aucune application ne doit détenir d'identifiant du realm
+  `master`, qui administre tous les realms. Le compte administrateur garde un mot de passe
+  long, la détection de force brute est activée sur le realm `master` (Realm settings >
+  Security defenses) et un OTP est exigé pour lui : depuis les pods, ses endpoints ne
+  passent pas par la limite de débit de la passerelle.
+- Un seul jeton de lecture des images sert toutes les organisations : si elles
+  correspondent à des clients distincts, utiliser un compte machine par organisation.
+- Les applications sortent librement vers Internet et vers les services de la plateforme
+  autorisés : le cloisonnement repose sur les politiques d'entrée.
 - Promtail est en fin de vie : migration vers Grafana Alloy à prévoir.
 - Les mises à jour en place d'une installation existante ne sont pas le chemin nominal
   (par exemple, la taille du PVC d'Alertmanager est immuable) : réinstaller.
@@ -231,7 +266,7 @@ PostgreSQL, sauvegardes locales) et `/root/.k3s-secrets` sont supprimés.
 
 ```bash
 cp vps/config.env.example vps/config.env
-nano vps/config.env           # GATEWAY_HOSTNAMES, AUTH_HOSTNAMES, SCM_*, REGISTRY_HOST, LETSENCRYPT_EMAIL, OFFSITE_BACKUP_*
+nano vps/config.env           # GATEWAY_HOSTNAMES (<hostname>=<namespace>), AUTH_HOSTNAMES, SCM_*, REGISTRY_HOST, LETSENCRYPT_EMAIL, OFFSITE_BACKUP_*
 ./vps/scripts/apply-config.sh --check
 ./vps/install.sh
 ```
@@ -285,7 +320,8 @@ restore() {
 kubectl scale statefulset keycloak -n security --replicas=0
 kubectl wait --for=delete pod/keycloak-0 -n security --timeout=180s
 pg psql -h 127.0.0.1 -U postgres -d postgres -X \
-    -c 'DROP DATABASE keycloak WITH (FORCE)' -c 'CREATE DATABASE keycloak OWNER keycloak'
+    -c 'DROP DATABASE keycloak WITH (FORCE)' -c 'CREATE DATABASE keycloak OWNER keycloak' \
+    -c 'REVOKE ALL ON DATABASE keycloak FROM PUBLIC'
 restore keycloak
 kubectl scale statefulset keycloak -n security --replicas=1
 restore <app>-prod
@@ -298,16 +334,21 @@ Le compte `admin` du realm `master` redevient celui de l'ancienne installation :
 passe est `KEYCLOAK_ADMIN_PASSWORD` de `migration/k3s-secrets-old/credentials.env` (celui de
 `/root/.k3s-secrets/credentials.env` ne vaut que pour une base vide). Le reporter dans
 `credentials.env`, ou le changer dans la console d'administration (port-forward) et y
-enregistrer le nouveau, ainsi que dans les SealedSecrets des applications qui l'utilisent.
+enregistrer le nouveau. Ce compte administre tous les realms : aucune application ne doit
+le détenir (une application gère son realm avec un compte de service de ce realm). Si une
+application l'utilisait, passer à un compte de service, puis changer ce mot de passe.
 
 ### 12. Redonner accès aux dépôts
 
 Argo CD découvre alors les dépôts de chaque organisation de `SCM_ORGANIZATIONS` et
-déploie les applications (token GitHub classique, droits `repo` et `read:packages`) :
+déploie les applications onboardées. Deux jetons : lecture des images (`read:packages`
+seul, copié dans chaque namespace applicative), puis dépôts (`repo`, namespace `argocd`
+seulement), idéalement d'un compte machine en lecture seule :
 
 ```bash
+./vps/scripts/export-secrets.sh set-registry-credentials
 ./vps/scripts/export-secrets.sh set-scm-credentials github
-kubectl get applications -n argocd
+kubectl get appprojects,applications -n argocd
 kubectl get sealedsecrets -A
 ```
 
@@ -345,6 +386,16 @@ grep -c -F -f <(grep '^POSTGRES_ADMIN_PASSWORD=' /root/.k3s-secrets/credentials.
 - `config.env` : `DOMAIN` est remplacé par `GATEWAY_HOSTNAMES` et `AUTH_HOSTNAMES` ;
   `SCM_ORGANIZATIONS` (plusieurs organisations) et `REGISTRY_HOST` complètent
   `SCM_ORGANIZATION` et `REGISTRY_BASE`, toujours lus pour une organisation unique.
+- Chaque entrée de `GATEWAY_HOSTNAMES` déclare la namespace qui route le hostname
+  (`<hostname>=<namespace>`) ; l'ancien format est refusé avec un message explicite.
+- Deux jetons au lieu d'un (`set-registry-credentials`, `set-scm-credentials`).
+- Argo CD ne déploie que les applications onboardées (un AppProject chacune) ; le niveau
+  Pod Security de l'alpha passe à `restricted`.
+- Plus de Redis partagé (namespace `database`) : un cache vit dans le chart de
+  l'application. `onboard-app.sh --with-cicd` et `export-secrets.sh export-kubeconfig`
+  sont supprimés.
+- Migration en place d'un VPS déjà à jour par ailleurs :
+  [`../README.md`](../README.md#isolating-the-applications-on-an-existing-vps).
 - kubectl depuis le poste passe par un tunnel SSH (le port 6443 est fermé).
 - Grafana est servi à la racine (plus de sous-chemin `/grafana`).
 - Le webhook Discord utilise l'intégration native d'Alertmanager : URL sans `/slack`.

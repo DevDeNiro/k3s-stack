@@ -28,7 +28,6 @@ flowchart TB
 
         subgraph NS_Infra["Infrastructure namespaces"]
             PG["storage: postgresql-0\n(TLS, SCRAM)"]
-            Redis["database: redis"]
             KC["security: keycloak\n(route auth.localhost, master realm blocked)"]
             Argo["argocd: Argo CD"]
             SS["kube-system: Sealed Secrets"]
@@ -39,7 +38,6 @@ flowchart TB
     IGW --> RouteApp --> PodApp
     IGW -->|/realms, /resources| KC
     PodApp -.->|SQL over TLS| PG
-    PodApp -.->|cache, sessions| Redis
     PodApp -.->|OIDC| KC
     SecDB -.-> PodApp
 ```
@@ -59,7 +57,7 @@ The scripts run with the bash 3.2 of macOS.
 ## Quick start
 
 ```bash
-./local/install.sh                  # Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets
+./local/install.sh                  # Gateway API, PostgreSQL, Argo CD, Sealed Secrets
 ./local/install.sh --all            # plus Keycloak and Prometheus/Grafana
 ./local/deploy-app.sh my-app        # chart ../my-app/helm/my-app with its values-local.yaml
 ./local/uninstall.sh                # delete everything
@@ -77,13 +75,12 @@ Makefile shortcuts: `make local-install`, `make local-deploy-app APP=my-app`, `m
 
 | Option | Effect |
 |--------|--------|
-| `--minimal` | Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets (default) |
+| `--minimal` | Gateway API, PostgreSQL, Argo CD, Sealed Secrets (default) |
 | `--all` | everything, Keycloak and Prometheus/Grafana included |
 | `--with-keycloak` | Keycloak in `security` (~1 GB RAM), routed on http://auth.localhost |
 | `--with-monitoring` | Prometheus and Grafana in `monitoring` |
 | `--skip-argocd` | no Argo CD |
 | `--skip-postgres` | no PostgreSQL (incompatible with Keycloak) |
-| `--skip-redis` | no Redis |
 | `--recreate` | delete and recreate the cluster when it exists |
 | `-y`, `--yes` | no confirmation prompt (with `--recreate`) |
 
@@ -126,7 +123,8 @@ counterpart of `vps/scripts/onboard-app.sh` followed by the Argo CD sync:
 | `--values FILE` | `<chart>/values-local.yaml` | values file |
 | `--skip-database` | - | no role, database or `<app>-db` Secret (static client served by nginx) |
 
-Application-specific Secrets (OIDC client, API keys) come from the application chart. A
+Application-specific Secrets (OIDC client, API keys) and caches (Redis) come from the
+application chart, as on the VPS. A
 private image is pulled with a Secret `ghcr-secret` created in `<app>-local` beforehand
 (`kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io ...`); a local
 image is loaded with `k3d image import`. The script prints the hostnames of the
@@ -156,10 +154,10 @@ application HTTPRoutes: add them to `/etc/hosts` (`127.0.0.1 <hostname>`), excep
 | Argo CD | chart 10.17.1 | same | |
 | Sealed Secrets | chart 2.22.0 | same | |
 | Prometheus / Grafana | charts 29.47.0 / 10.5.15 | same (plus Loki, Promtail, Alertmanager rules) | `local/values/` |
-| Redis | 7 | same | |
 
 Local exceptions: no firewall, no TLS on the Gateway (no cert-manager), no audit log, no
-NetworkPolicies, no Pod Security labels, no backups (local or off-site), default access log
+NetworkPolicies, no Pod Security labels, no Argo CD projects per application (`deploy-app.sh`
+installs the chart with Helm), no backups (local or off-site), default access log
 format of the gateway. Ports are published on 127.0.0.1 only. The `prometheus-config-reloader` image is overridden with a multi-arch release for
 Apple Silicon (`local/values/prometheus.yaml`).
 
@@ -193,7 +191,6 @@ kubectl config use-context k3d-dev-cluster
 kubectl port-forward -n argocd svc/argocd-server 8443:80     # http://localhost:8443, admin / local/argocd_password.txt
 kubectl port-forward -n security svc/keycloak 8080:80        # http://localhost:8080/admin, admin / local/keycloak_password.txt
 kubectl port-forward -n monitoring svc/grafana 3000:80       # http://localhost:3000, admin / admin (local values)
-kubectl exec -it -n database deploy/redis -- redis-cli
 ```
 
 PostgreSQL (the password stays in the pod):

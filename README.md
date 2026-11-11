@@ -11,8 +11,11 @@ Kubernetes platform for a **single VPS**, with a **local k3d mirror** for develo
   backups and an optional encrypted off-site copy (restic, S3-compatible storage)
 - **Keycloak** 26: only the OIDC endpoints are public (rate limited per client address), the master
   realm and the admin console are not; themes and providers come from extension images
-- **Redis**, **Argo CD** with repository auto-discovery across several GitHub organizations and
-  Image Updater, **Sealed Secrets**
+- **Argo CD** with repository auto-discovery across several GitHub organizations, one project per
+  application, and Image Updater, **Sealed Secrets**
+- **Applications isolated from each other**: each one gets its namespaces (Pod Security
+  `restricted`, quota, default NetworkPolicy), its database role, its Argo CD project and its
+  public hostnames; caches such as Redis live in the application chart
 - **Prometheus, Alertmanager (Discord), Loki, Promtail, Grafana**, with secrets carried by URLs
   masked before Loki
 
@@ -51,8 +54,6 @@ Then follow [`vps/docs/vps-deployment.md`](vps/docs/vps-deployment.md).
 
 ## Example applications
 
-- **Java** (Spring Boot / Kotlin, HTML rendered by the server with HTMX, PostgreSQL, Keycloak):
-  [DevDeNiro/coterie-webapp-alpha](https://github.com/DevDeNiro/coterie-webapp-alpha)
 - **React** (Vite build served by nginx, no database):
   [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit)
 

@@ -10,6 +10,11 @@
 # Repository names must be unique across the organizations: they name the
 # Applications and the namespaces (<repository>-alpha, <repository>-prod).
 #
+# Each Application belongs to the AppProject <repository>, and deploys into the
+# namespaces created by vps/scripts/onboard-app.sh (templates/onboarding/):
+# Argo CD creates neither of them. A repository that is not onboarded gets no
+# Application (the ApplicationSet skips it and retries every 3 minutes).
+#
 # The scm-token Secret is managed by export-secrets.sh set-scm-credentials,
 # never here (it would be overwritten with empty values).
 #
@@ -49,7 +54,8 @@ ${ALPHA_GENERATORS}
                 argocd-image-updater.argoproj.io/app.helm.image-name: image.repository
                 argocd-image-updater.argoproj.io/app.helm.image-tag: image.tag
         spec:
-            project: default
+            # AppProject of onboard-app.sh: its repository and its namespaces only
+            project: "{{repository}}"
             source:
                 repoURL: "{{url}}"
                 targetRevision: develop
@@ -70,8 +76,6 @@ ${ALPHA_GENERATORS}
                 automated:
                     prune: true
                     selfHeal: true
-                syncOptions:
-                    - CreateNamespace=true
 
 ---
 # ApplicationSet - Production environments (main branch)
@@ -110,7 +114,8 @@ ${PROD_GENERATORS}
                 argocd-image-updater.argoproj.io/app.helm.image-name: image.repository
                 argocd-image-updater.argoproj.io/app.helm.image-tag: image.tag
         spec:
-            project: default
+            # AppProject of onboard-app.sh: its repository and its namespaces only
+            project: "{{repository}}"
             source:
                 repoURL: "{{url}}"
                 targetRevision: main
@@ -127,8 +132,5 @@ ${PROD_GENERATORS}
             destination:
                 server: https://kubernetes.default.svc
                 namespace: "{{repository}}-prod"
-            syncPolicy:
-                # No automated sync in production: sync manually once the production
-                # SealedSecrets of the application are committed
-                syncOptions:
-                    - CreateNamespace=true
+            # No syncPolicy: no automated sync in production, sync manually once the
+            # production SealedSecrets of the application are committed

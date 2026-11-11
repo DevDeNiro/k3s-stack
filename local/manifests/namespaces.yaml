@@ -13,15 +13,6 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-    name: database
-    labels:
-        app.kubernetes.io/name: database
-        app.kubernetes.io/component: infrastructure
-        app.kubernetes.io/managed-by: k3s-local
----
-apiVersion: v1
-kind: Namespace
-metadata:
     name: storage
     labels:
         app.kubernetes.io/name: storage

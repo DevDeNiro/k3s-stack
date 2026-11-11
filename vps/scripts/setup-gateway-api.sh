@@ -5,7 +5,8 @@ set -euo pipefail
 # Public exposure of the cluster, declared in vps/config.env and rendered from
 # vps/templates/:
 #   - Gateway infrastructure-gateway: HTTP listener (ACME, redirects) and one
-#     HTTPS listener per hostname of GATEWAY_HOSTNAMES
+#     HTTPS listener per hostname of GATEWAY_HOSTNAMES (<hostname>=<namespace>),
+#     which only accepts the HTTPRoutes of the namespaces declared for it
 #   - one Let's Encrypt Certificate per hostname (removed hostnames are pruned)
 #   - HTTPRoute https-redirect: HTTP -> HTTPS
 #   - HTTPRoutes keycloak (/realms, master realm blocked) and keycloak-resources
@@ -34,10 +35,12 @@ usage() {
         "" \
         "Renders and applies the Gateway, certificates, HTTPS redirection, Keycloak routes and" \
         "rate limit, and CoreDNS hairpin from GATEWAY_HOSTNAMES, AUTH_HOSTNAMES and" \
-        "KEYCLOAK_RATE_LIMIT_* (vps/config.env)." \
+        "KEYCLOAK_RATE_LIMIT_* (vps/config.env). Each HTTPS listener only accepts the routes" \
+        "of the namespaces declared for its hostname (<hostname>=<namespace>)." \
         "" \
         "  --staging  Let's Encrypt staging certificates (untrusted, for tests: no rate limit)" \
-        "  --no-tls   HTTP only: no HTTPS listener, certificate or redirection (tests)" \
+        "  --no-tls   HTTP only: no HTTPS listener, certificate or redirection, and every" \
+        "             namespace routes any hostname on port 80 (tests only)" \
         "  --dry-run  print the rendered manifests without applying them"
 }
 
@@ -79,17 +82,48 @@ render_listener_refs() {
     done
 }
 
+# quoted_list <word>...: "a", "b" (items of a YAML flow sequence)
+quoted_list() {
+    local item list=""
+    for item in "$@"; do
+        list="${list:+$list, }\"$item\""
+    done
+    echo "$list"
+}
+
+# warn_missing_owners: namespaces of GATEWAY_HOSTNAMES that do not exist yet:
+# their hostname serves nothing until the application is onboarded
+warn_missing_owners() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        return 0
+    fi
+    local host namespace
+    for host in $(gateway_hosts); do
+        for namespace in $(gateway_host_namespaces "$host"); do
+            kubectl get namespace "$namespace" >/dev/null 2>&1 \
+                || warn "$host: namespace $namespace does not exist yet (sudo ./vps/scripts/onboard-app.sh <app>)"
+        done
+    done
+}
+
 apply_gateway() {
     step "Gateway ${GATEWAY_NAME}"
-    local host slug listeners=""
+    local host slug listeners="" http_from="Same"
     if [[ "$TLS" == "true" ]]; then
-        for host in $GATEWAY_HOSTNAMES; do
+        for host in $(gateway_hosts); do
             slug=$(hostname_slug "$host")
+            # shellcheck disable=SC2046  # word splitting of the namespace list
             listeners+="$(render_template "$TEMPLATES/gateway/https-listener.yaml.tpl" \
-                "HOST=$host" "HOST_SLUG=$slug")"$'\n'
+                "HOST=$host" "HOST_SLUG=$slug" \
+                "ALLOWED_NAMESPACES=$(quoted_list $(gateway_host_namespaces "$host"))")"$'\n'
         done
+    else
+        # HTTP only: the applications route on the http listener
+        http_from="All"
+        warn "--no-tls: every namespace can route any hostname on port 80 (tests only)"
     fi
-    render_template "$TEMPLATES/gateway/gateway.yaml.tpl" "HTTPS_LISTENERS=$listeners" | apply_manifest
+    render_template "$TEMPLATES/gateway/gateway.yaml.tpl" \
+        "HTTP_ROUTES_FROM=$http_from" "HTTPS_LISTENERS=$listeners" | apply_manifest
 }
 
 apply_certificates() {
@@ -103,7 +137,7 @@ apply_certificates() {
     fi
 
     local host slug wanted="" cert
-    for host in $GATEWAY_HOSTNAMES; do
+    for host in $(gateway_hosts); do
         slug=$(hostname_slug "$host")
         wanted="$wanted tls-${slug}"
         render_template "$TEMPLATES/cert-manager/certificate.yaml.tpl" \
@@ -135,8 +169,8 @@ apply_https_redirect() {
     fi
     step "HTTP to HTTPS redirection"
     local hostnames
-    # shellcheck disable=SC2086  # word splitting of the hostname list
-    hostnames=$(render_hostnames $GATEWAY_HOSTNAMES)
+    # shellcheck disable=SC2046  # word splitting of the hostname list
+    hostnames=$(render_hostnames $(gateway_hosts))
     render_template "$TEMPLATES/gateway/https-redirect.yaml.tpl" "HOSTNAMES=$hostnames" | apply_manifest
 }
 
@@ -215,7 +249,7 @@ apply_hairpin() {
     fi
     target="${service}.${GATEWAY_NAMESPACE}.svc.cluster.local"
 
-    for host in $GATEWAY_HOSTNAMES; do
+    for host in $(gateway_hosts); do
         rules+="$(render_template "$TEMPLATES/coredns/rewrite-rule.tpl" \
             "HOST=$host" "GATEWAY_SERVICE=$target")"$'\n'
     done
@@ -259,6 +293,7 @@ main() {
             || die "GatewayClass nginx not found: NGINX Gateway Fabric is installed by vps/install.sh"
     fi
 
+    warn_missing_owners
     apply_gateway
     apply_certificates
     apply_https_redirect
@@ -271,7 +306,8 @@ main() {
         kubectl get gateway "$GATEWAY_NAME" -n "$GATEWAY_NAMESPACE"
         kubectl get httproutes -A
         echo ""
-        echo "Applications attach their HTTPRoutes to the Gateway:"
+        echo "Applications attach their HTTPRoutes to the Gateway, from the namespace declared"
+        echo "for their hostname in GATEWAY_HOSTNAMES (other routes: NotAllowedByListeners):"
         echo "  parentRefs: [{ name: ${GATEWAY_NAME}, namespace: ${GATEWAY_NAMESPACE} }]"
     fi
 }

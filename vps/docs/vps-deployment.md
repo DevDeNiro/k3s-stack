@@ -13,11 +13,14 @@ application (`my-app` dans les exemples). La référence des scripts et de leurs
 | Routage | Gateway API v1.6.3 + NGINX Gateway Fabric 2.8.1 | `nginx-gateway` | point d'entrée HTTP/HTTPS (hostPorts 80/443) |
 | Certificats | cert-manager v1.21.3 (Let's Encrypt HTTP-01) | `cert-manager` | un certificat par hostname |
 | Base de données | PostgreSQL 18 (Bitnami), TLS, SCRAM | `storage` | instance partagée, un rôle et une base par application |
-| Cache | Redis 7 | `database` | sessions, rate limiting |
 | IAM | Keycloak 26.8.2 | `security` | un realm par environnement |
 | GitOps | Argo CD + Image Updater | `argocd` | déploiement continu depuis Git |
 | Secrets versionnés | Sealed Secrets | `kube-system` | déchiffrement dans le cluster |
 | Observabilité | Prometheus, Alertmanager, Loki, Promtail, Grafana | `monitoring` | métriques, alertes, logs |
+
+Les applications sont cloisonnées entre elles : chacune a ses namespaces (Pod Security
+`restricted`, quota, NetworkPolicy par défaut), son rôle PostgreSQL, son AppProject Argo CD
+et ses hostnames. Un cache (Redis) se déploie dans le chart de l'application.
 
 ## Étape 1 : préparer le serveur
 
@@ -41,7 +44,7 @@ nano vps/config.env
 | `SCM_ORGANIZATIONS` | `my-org other-org` (une ou plusieurs organisations) |
 | `REGISTRY_HOST` | `ghcr.io` (images `ghcr.io/<organisation>/<dépôt>`) |
 | `LETSENCRYPT_EMAIL` | `admin@example.com` |
-| `GATEWAY_HOSTNAMES` | `auth.example.com app.example.com alpha.example.com` |
+| `GATEWAY_HOSTNAMES` | `auth.example.com=security app.example.com=my-app-prod alpha.example.com=my-app-alpha` (hostname et namespace autorisée à le router) |
 | `AUTH_HOSTNAMES` | `auth.example.com` |
 | `KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST` | `10r/s`, `20` (valeurs par défaut) |
 | `KEYCLOAK_EXTENSION_IMAGES` | vide, ou `ghcr.io/my-org/my-app-keycloak-theme:1.0.0` (étape 11) |
@@ -87,18 +90,23 @@ OIDC, et la résolution interne des hostnames publics (les pods joignent
 `https://auth.example.com` sans sortir du cluster). Il se relance après chaque modification
 de `GATEWAY_HOSTNAMES`, `AUTH_HOSTNAMES` ou `KEYCLOAK_RATE_LIMIT_*`.
 
-## Étape 5 : accès aux dépôts pour Argo CD
+## Étape 5 : accès aux images et aux dépôts
 
 ```bash
-sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
+sudo ./vps/scripts/export-secrets.sh set-registry-credentials     # jeton de lecture des images
+sudo ./vps/scripts/export-secrets.sh set-scm-credentials github   # jeton des dépôts
 ```
 
-Un seul token pour toutes les organisations de `SCM_ORGANIZATIONS` : token GitHub
-**classique** avec les droits `repo` et `read:packages` (un token fine-grained est limité à
-un seul propriétaire, et GHCR n'accepte que les tokens classiques). Son propriétaire doit
-pouvoir lire les dépôts et les packages de chaque organisation. Argo CD découvre alors les
-dépôts qui contiennent un dossier `helm/` (voir plus bas), l'Image Updater lit GHCR et
-Keycloak peut tirer des images d'extension privées.
+Deux jetons, chacun valable pour toutes les organisations de `SCM_ORGANIZATIONS`, idéalement
+ceux d'un compte machine membre des organisations en lecture seule :
+
+- le **jeton de lecture des images** est copié dans chaque namespace applicative, où tout
+  chart de l'application peut le lire : token GitHub **classique** avec le seul droit
+  `read:packages` (GHCR n'accepte que les tokens classiques). L'Image Updater et Keycloak
+  (images d'extension privées) l'utilisent aussi ;
+- le **jeton des dépôts** reste dans la namespace `argocd` : token classique avec le droit
+  `repo` (un token fine-grained est limité à un seul propriétaire). Argo CD découvre alors
+  les dépôts qui contiennent un dossier `helm/` (voir plus bas).
 
 ## Étape 6 : onboarder une application
 
@@ -110,15 +118,18 @@ sudo ./vps/scripts/onboard-app.sh my-app --organization other-org     # dépôt 
 Pour `my-app-alpha` et `my-app-prod` (`--environment prod` pour la production seule), le
 script crée :
 
-- le namespace, avec son quota et son niveau de Pod Security ;
-- le rôle et la base PostgreSQL ;
+- le namespace, avec son quota, son niveau de Pod Security (`restricted`) et sa
+  NetworkPolicy par défaut ;
+- le rôle et la base PostgreSQL, fermée aux autres rôles ;
 - le Secret `my-app-db`, dont les URLs exigent TLS ;
-- les Secrets d'accès à GHCR et au dépôt.
+- le Secret de lecture des images (`ghcr-secret`) et le Secret d'accès au dépôt ;
+- en dernier, l'AppProject `my-app` : Argo CD déploie l'application dans les 3 minutes.
 
 Une application sans base de données (client statique servi par nginx) s'onboarde avec
 `--skip-database`. Les mots de passe sont conservés dans `/root/.k3s-secrets/my-app.env`. Les
 routes de l'application (HTTPRoutes de son chart) s'attachent à la Gateway
-`infrastructure-gateway` ; leurs hostnames doivent figurer dans `GATEWAY_HOSTNAMES`.
+`infrastructure-gateway` ; chaque hostname figure dans `GATEWAY_HOSTNAMES` avec la namespace
+qui le route (`app.example.com=my-app-prod`), puis `setup-gateway-api.sh`.
 
 ## Étape 7 : sceller les secrets de l'application (poste développeur)
 
@@ -205,9 +216,11 @@ ou 465, autorisé par la NetworkPolicy de Keycloak.
 L'installation configure deux ApplicationSets
 (`templates/argocd/applicationsets.yaml.tpl`), avec un générateur par organisation de
 `SCM_ORGANIZATIONS`. Argo CD parcourt chaque organisation et crée, pour chaque dépôt
-contenant `helm/<repo>/`, l'Application `<repo>-prod` (branche `main`), et
+onboardé contenant `helm/<repo>/`, l'Application `<repo>-prod` (branche `main`), et
 `<repo>-alpha` (branche `develop`) seulement si le dépôt a une branche `develop` contenant
-`helm/`. L'Image Updater suit les nouvelles images `ghcr.io/<organisation>/<repo>` d'après
+`helm/`. Un dépôt non onboardé n'a pas d'AppProject, donc pas d'Application. Le chart ne
+doit contenir aucune ressource de niveau cluster (Namespace, ClusterRole, CRD...) ni
+`ResourceQuota`, `LimitRange`, `Endpoints` ou `EndpointSlice`.
 les annotations des Applications. Les noms de dépôt doivent être en minuscules et uniques
 entre les organisations.
 
@@ -234,8 +247,10 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controlle
 | Problème | Cause |
 |----------|-------|
 | `generated 0 applications` | pas de dossier `helm/`, token sans accès à l'organisation, ou (alpha) pas de branche `develop` |
+| `application references project ... which does not exist` | application non onboardée : `onboard-app.sh <app>` |
+| `... is not permitted in project` | ressource de niveau cluster, de type refusé ou d'une autre namespace dans le chart |
 | `secret scm-token not found` | `export-secrets.sh set-scm-credentials` non exécuté |
-| `ImagePullBackOff` | `ghcr-secret` absent : onboarder après `set-scm-credentials` |
+| `ImagePullBackOff` | `ghcr-secret` absent : `set-registry-credentials`, puis onboarder |
 | Application en double, `duplicate name` | même nom de dépôt dans deux organisations : renommer l'un des dépôts |
 
 ## Dépannage
@@ -245,7 +260,9 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controlle
 | Certificat en attente | DNS propagé et port 80 joignable : `kubectl describe certificate -n nginx-gateway`, `kubectl get challenges -A` |
 | Sites injoignables | `kubectl get pods,events -n nginx-gateway` (data plane `infrastructure-gateway-nginx`) |
 | Keycloak : `Unable to resolve issuer` | `kubectl get configmap coredns-custom -n kube-system -o yaml` (relancer `setup-gateway-api.sh`) |
-| Keycloak en `Init:ImagePullBackOff` | référence de `KEYCLOAK_EXTENSION_IMAGES` ; image privée : `set-scm-credentials github`, puis `apply-keycloak.sh` |
+| Keycloak en `Init:ImagePullBackOff` | référence de `KEYCLOAK_EXTENSION_IMAGES` ; image privée : `set-registry-credentials`, puis `apply-keycloak.sh` |
+| Route non attachée (`NotAllowedByListeners`) | namespace de la route absente de son hostname dans `GATEWAY_HOSTNAMES`, puis `setup-gateway-api.sh` |
+| Pod refusé (`violates PodSecurity "restricted"`) | le chart doit tourner en non-root, sans capacité, sans escalade de privilèges, avec un profil seccomp |
 | Keycloak répond `429` | augmenter `KEYCLOAK_RATE_LIMIT_RATE` / `KEYCLOAK_RATE_LIMIT_BURST` (ou `off`), puis `setup-gateway-api.sh` |
 | Application sans base | label `app.kubernetes.io/managed-by=k3s-stack` du namespace, Secret `<app>-db` |
 | K3s ne démarre pas | `systemctl status k3s`, `journalctl -u k3s -n 100` |

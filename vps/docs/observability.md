@@ -169,8 +169,12 @@ helm upgrade promtail grafana/promtail --version "$PROMTAIL_CHART_VERSION" -n mo
 NetworkPolicies (`vps/manifests/network-policies.yaml`): Prometheus reaches every pod
 (scrape targets, Alertmanager) and the node (Kubernetes API 6443, kubelet 10250,
 node-exporter 9100), never the Internet; Grafana reaches its three datasources, the
-Kubernetes API (dashboard sidecar) and HTTPS outside the cluster. A policy applies to new
-connections only: after changing one, restart the pods it selects before testing.
+Kubernetes API (dashboard sidecar) and HTTPS outside the cluster. Every pod of
+`monitoring` only accepts connections from the namespace itself: Loki answers queries on
+the logs of every namespace without authentication, so the applications never reach it.
+The application namespaces let Prometheus in (default policy of `onboard-app.sh`). A policy
+applies to new connections only: after changing one, restart the pods it selects before
+testing.
 
 Known items to review:
 - Promtail is end-of-life: migrate the log shipping to Grafana Alloy.

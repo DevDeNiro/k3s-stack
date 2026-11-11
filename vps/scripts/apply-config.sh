@@ -7,6 +7,9 @@ set -euo pipefail
 #                               scmProvider generator per organization of
 #                               SCM_ORGANIZATIONS (templates/argocd/generator-*.yaml.tpl)
 #   - Image Updater CRs         manifests/argocd-image-updaters.yaml
+#   - Argo CD project default   manifests/argocd-default-project.yaml, emptied:
+#                               each application has its own project
+#                               (onboard-app.sh)
 # Called by install.sh (--check first, then apply); run it again after changing
 # SCM_ORGANIZATIONS, REGISTRY_HOST or REGISTRY_BASE.
 # =============================================================================
@@ -22,8 +25,8 @@ usage() {
         "Usage: [sudo] $0 [--check | --dry-run]" \
         "" \
         "Validates vps/config.env, then renders and applies the Argo CD ApplicationSets" \
-        "(one generator per organization of SCM_ORGANIZATIONS) and Image Updater CRs" \
-        "(root required to apply)." \
+        "(one generator per organization of SCM_ORGANIZATIONS), the Image Updater CRs and" \
+        "the emptied default project (root required to apply)." \
         "" \
         "  --check    validate config.env only" \
         "  --dry-run  print the rendered manifests without applying them"
@@ -58,6 +61,7 @@ render_applicationsets() {
 render_gitops() {
     render_applicationsets
     cat "$VPS_MANIFESTS_DIR/argocd-image-updaters.yaml"
+    cat "$VPS_MANIFESTS_DIR/argocd-default-project.yaml"
 }
 
 apply_gitops() {
@@ -68,7 +72,21 @@ apply_gitops() {
     step "Applying the Argo CD auto-discovery ($(scm_organizations))"
     render_applicationsets | kubectl apply -f -
     kubectl apply -f "$VPS_MANIFESTS_DIR/argocd-image-updaters.yaml"
-    ok "ApplicationSets and Image Updater CRs applied"
+    kubectl apply -f "$VPS_MANIFESTS_DIR/argocd-default-project.yaml"
+    ok "ApplicationSets, Image Updater CRs and default project applied"
+    # The ApplicationSet controller moves the Applications of the onboarded
+    # repositories to their own project within seconds; the others stay in the
+    # emptied default project, refused
+    local orphans=""
+    for _ in 1 2 3 4 5 6; do
+        orphans=$(kubectl get applications -n argocd \
+            -o jsonpath='{range .items[?(@.spec.project=="default")]}{.metadata.name}{" "}{end}' 2>/dev/null || true)
+        [[ -z "$orphans" ]] && break
+        sleep 5
+    done
+    if [[ -n "$orphans" ]]; then
+        warn "Applications refused until their application is onboarded (onboard-app.sh): $orphans"
+    fi
     kubectl get secret scm-token -n argocd >/dev/null 2>&1 \
         || warn "Repository access missing: sudo ./vps/scripts/export-secrets.sh set-scm-credentials $SCM_PROVIDER"
 }

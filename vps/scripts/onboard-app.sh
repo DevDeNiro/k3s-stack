@@ -3,15 +3,20 @@ set -euo pipefail
 
 # =============================================================================
 # Onboards an application, per environment (<app>-alpha, <app>-prod):
-#   - namespace, ResourceQuota, LimitRange and Pod Security level
-#     (templates/onboarding/namespace.yaml.tpl, config/onboarding/<env>.env)
-#   - PostgreSQL role and database <app>-<env> and the Secret <app>-db;
-#     an existing password is never changed
-#   - image pull Secret ghcr-secret and the Argo CD repository Secret of
-#     <organization>/<app> (--organization, default: first of SCM_ORGANIZATIONS)
-#   - with --with-cicd: a deployer ServiceAccount and its kubeconfig
-# Public hostnames are declared in config.env (GATEWAY_HOSTNAMES) and served by
-# setup-gateway-api.sh.
+#   - namespace, ResourceQuota, LimitRange, Pod Security level and default
+#     NetworkPolicy (templates/onboarding/namespace.yaml.tpl,
+#     config/onboarding/<env>.env)
+#   - PostgreSQL role and database <app>-<env>, closed to the other roles, and
+#     the Secret <app>-db; an existing password is never changed
+#   - image pull Secret ghcr-secret, copied from argocd/ghcr-registry-secret
+#     (read-only token of export-secrets.sh set-registry-credentials)
+# then, once for the application:
+#   - the Argo CD repository Secret of <organization>/<app> (--organization,
+#     default: first of SCM_ORGANIZATIONS)
+#   - last, the Argo CD AppProject <app> (templates/onboarding/appproject.yaml.tpl):
+#     the ApplicationSets deploy the application from then on
+# Public hostnames are declared in config.env (GATEWAY_HOSTNAMES,
+# <hostname>=<app>-<env>) and served by setup-gateway-api.sh.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,28 +26,27 @@ source "$SCRIPT_DIR/lib/common.sh"
 APP_NAME=""
 TARGET_ENVS=(alpha prod)
 SKIP_DATABASE=false
-WITH_CICD=false
 APP_SECRETS_FILE=""
 ORGANIZATION=""
 
 usage() {
     printf '%s\n' \
         "Usage: sudo $0 <app-name> [--environment all|alpha|prod] [--organization ORG]" \
-        "                          [--skip-database] [--with-cicd]" \
+        "                          [--skip-database]" \
         "" \
-        "Creates, for each environment (<app>-alpha, <app>-prod): the namespace with its quota" \
-        "and Pod Security level, the PostgreSQL database and Secret <app>-db, the image pull" \
-        "Secret ghcr-secret and the Argo CD repository Secret." \
+        "Creates, for each environment (<app>-alpha, <app>-prod): the namespace with its quota," \
+        "Pod Security level and default NetworkPolicy, the PostgreSQL database and Secret <app>-db," \
+        "the image pull Secret ghcr-secret. Then the Argo CD repository Secret and, last, the" \
+        "AppProject that lets Argo CD deploy the application." \
         "" \
         "  --environment ENV   all (default), alpha or prod" \
         "  --organization ORG  organization of the repository, one of SCM_ORGANIZATIONS" \
         "                      (default: the first one)" \
         "  --skip-database     no PostgreSQL role, database or <app>-db Secret" \
-        "  --with-cicd         deployer ServiceAccount and kubeconfig for a CI pipeline" \
-        "                      (Argo CD already pulls the deployments)" \
         "" \
         "Database passwords: ${SECRETS_DIR}/<app>.env (restore it before onboarding" \
-        "again after a reinstallation: existing passwords are kept)."
+        "again after a reinstallation: existing passwords are kept)." \
+        "Onboarding again is safe: it applies the current templates and keeps the passwords."
 }
 
 parse_args() {
@@ -62,7 +66,9 @@ parse_args() {
                 shift
                 ;;
             --skip-database) SKIP_DATABASE=true ;;
-            --with-cicd) WITH_CICD=true ;;
+            --with-cicd)
+                die "--with-cicd was removed: Argo CD pulls the deployments, no long-lived cluster token is handed out (vps/docs/security-hardening.md)"
+                ;;
             -h|--help) usage; exit 0 ;;
             -*) usage; die "unknown option: $1" ;;
             *)
@@ -75,6 +81,9 @@ parse_args() {
     [[ -n "$APP_NAME" ]] || { usage; exit 1; }
     [[ "$APP_NAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] \
         || die "application name: lowercase letters, digits and hyphens only"
+    # The Argo CD project of the application bears its name, and "default" is the
+    # emptied project of Argo CD (manifests/argocd-default-project.yaml)
+    [[ "$APP_NAME" != "default" ]] || die "application name: 'default' is reserved (Argo CD project)"
     APP_SECRETS_FILE="$SECRETS_DIR/${APP_NAME}.env"
 }
 
@@ -92,6 +101,11 @@ resolve_organization() {
     [[ -z "$ORGANIZATION" ]] \
         || die "--organization $ORGANIZATION is not listed in SCM_ORGANIZATIONS ($(scm_organizations))"
     ORGANIZATION="$first"
+}
+
+# repository_url: Git URL of the repository of the application
+repository_url() {
+    echo "https://${SCM_PROVIDER}.com/${ORGANIZATION}/${APP_NAME}.git"
 }
 
 # -----------------------------------------------------------------------------
@@ -189,67 +203,66 @@ create_databases() {
     echo "  Passwords saved in $APP_SECRETS_FILE: seal them in the application repository for GitOps."
 }
 
-create_repository_secrets() {
-    step "Registry and repository access"
-    local creds="${SCM_PROVIDER}-repo-creds" token username env repo_url registry
+# create_pull_secrets: image pull Secret of each namespace, copied from the one of
+# Argo CD Image Updater. It holds the read-only registry token, never the
+# repository token: any chart of the application can read the Secrets of its
+# namespaces.
+create_pull_secrets() {
+    step "Image pull Secret"
+    local config env
+    config=$(secret_value argocd "$REGISTRY_PULL_SECRET" .dockerconfigjson)
+    if [[ -z "$config" ]]; then
+        warn "No argocd/${REGISTRY_PULL_SECRET}: run export-secrets.sh set-registry-credentials, then onboard again"
+        return 0
+    fi
+    for env in "${TARGET_ENVS[@]}"; do
+        apply_dockerconfig_secret "${APP_NAME}-${env}" "$APP_PULL_SECRET" "$config"
+    done
+    ok "${APP_PULL_SECRET} in ${TARGET_ENVS[*]/#/${APP_NAME}-}"
+}
+
+# create_repository_secret: Argo CD access to the repository of the application,
+# with the repository token of export-secrets.sh set-scm-credentials (namespace
+# argocd only)
+create_repository_secret() {
+    step "Argo CD repository access"
+    local creds="${SCM_PROVIDER}-repo-creds" token username repo_url
     token=$(secret_value argocd "$creds" password)
     if [[ -z "$token" ]]; then
         warn "No $creds Secret: run export-secrets.sh set-scm-credentials $SCM_PROVIDER, then onboard again"
         return 0
     fi
     username=$(secret_value argocd "$creds" username)
-    registry=$(registry_host)
-
-    for env in "${TARGET_ENVS[@]}"; do
-        apply_registry_secret "${APP_NAME}-${env}" ghcr-secret "$registry" "${username:-git}" "$token"
-    done
-    ok "ghcr-secret ($registry) in ${TARGET_ENVS[*]/#/${APP_NAME}-}"
-
-    repo_url="https://${SCM_PROVIDER}.com/${ORGANIZATION}/${APP_NAME}.git"
+    repo_url=$(repository_url)
     apply_secret argocd "repo-${APP_NAME}" type=git "url=$repo_url" "username=${username:-git}" "password=$token"
     kubectl label secret "repo-${APP_NAME}" -n argocd argocd.argoproj.io/secret-type=repository --overwrite >/dev/null
     ok "Argo CD repository Secret repo-${APP_NAME} ($repo_url)"
 }
 
-create_cicd_access() {
-    if [[ "$WITH_CICD" != "true" ]]; then
+# create_project: Argo CD AppProject of the application, applied last: the
+# ApplicationSets deploy the application from then on (within 3 minutes), with
+# everything it needs already in place
+create_project() {
+    step "Argo CD project ${APP_NAME}"
+    if ! kubectl get crd appprojects.argoproj.io >/dev/null 2>&1; then
+        warn "Argo CD is not installed: no AppProject"
         return 0
     fi
-    step "CI/CD access (deployer ServiceAccount)"
-    local env namespace api_server api_ca_data token dir="$SECRETS_DIR/kubeconfigs"
-    api_server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-    api_ca_data=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
-    install -d -m 700 "$dir"
-
-    for env in "${TARGET_ENVS[@]}"; do
-        namespace="${APP_NAME}-${env}"
-        render_template "$VPS_TEMPLATES_DIR/onboarding/deployer-rbac.yaml.tpl" "NAMESPACE=$namespace" \
-            | kubectl apply -f -
-        token=""
-        for _ in $(seq 1 15); do
-            token=$(secret_value "$namespace" deployer-token token)
-            [[ -n "$token" ]] && break
-            sleep 1
-        done
-        [[ -n "$token" ]] || die "the token of deployer in $namespace was not issued"
-        (
-            umask 077
-            render_template "$VPS_TEMPLATES_DIR/onboarding/deployer-kubeconfig.yaml.tpl" \
-                "NAMESPACE=$namespace" "API_SERVER=$api_server" "API_CA_DATA=$api_ca_data" \
-                "DEPLOYER_TOKEN=$token" > "$dir/${namespace}.kubeconfig"
-        )
-        ok "Kubeconfig: $dir/${namespace}.kubeconfig (export-secrets.sh export-kubeconfig ${APP_NAME} ${env} <dest>)"
-    done
+    render_template "$VPS_TEMPLATES_DIR/onboarding/appproject.yaml.tpl" \
+        APP_NAME "REPO_URL=$(repository_url)" | kubectl apply -f -
+    ok "AppProject ${APP_NAME}: repository $(repository_url), namespaces ${APP_NAME}-alpha and ${APP_NAME}-prod"
 }
 
 print_summary() {
     banner "${APP_NAME} onboarded (${TARGET_ENVS[*]})"
     echo "Next steps:"
-    echo "  - declare its public hostnames in GATEWAY_HOSTNAMES (vps/config.env), then:"
+    echo "  - declare its public hostnames in GATEWAY_HOSTNAMES (vps/config.env), each one with the"
+    echo "    namespace allowed to route it (<hostname>=${APP_NAME}-prod, <hostname>=${APP_NAME}-alpha), then:"
     echo "      sudo ./vps/scripts/setup-gateway-api.sh"
     echo "  - attach its HTTPRoutes to the Gateway infrastructure-gateway (namespace nginx-gateway)"
-    echo "  - Argo CD deploys helm/${APP_NAME} from ${ORGANIZATION}/${APP_NAME}: main -> prod, develop -> alpha"
-    echo "    when the repository has a develop branch (image $(image_base "$ORGANIZATION")/${APP_NAME})"
+    echo "  - Argo CD deploys helm/${APP_NAME} from ${ORGANIZATION}/${APP_NAME} within 3 minutes:"
+    echo "    main -> prod, develop -> alpha when the repository has a develop branch"
+    echo "    (image $(image_base "$ORGANIZATION")/${APP_NAME}, AppProject ${APP_NAME})"
 }
 
 main() {
@@ -265,8 +278,9 @@ main() {
     banner "Onboarding ${APP_NAME} (${TARGET_ENVS[*]}, organization ${ORGANIZATION})"
     create_namespaces
     create_databases
-    create_repository_secrets
-    create_cicd_access
+    create_pull_secrets
+    create_repository_secret
+    create_project
     print_summary
 }
 

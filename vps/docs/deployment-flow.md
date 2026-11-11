@@ -139,50 +139,58 @@ running applications with ArgoCD GitOps.
 - The gateway access logs carry the path without the query string (OAuth codes and states
   never logged); Promtail masks the tokens of `/stop/<token>` paths before Loki
 - Applications attach their own HTTPRoutes to `infrastructure-gateway` (namespace
-  `nginx-gateway`); their hostnames must be listed in `GATEWAY_HOSTNAMES`
+  `nginx-gateway`). Each hostname is declared in `GATEWAY_HOSTNAMES` with the namespace
+  allowed to route it (`<hostname>=<namespace>`): its HTTPS listener refuses the routes of
+  every other namespace (`NotAllowedByListeners`), so an application cannot take over a
+  hostname or a path of another one. The HTTP listener only serves the redirection and the
+  ACME challenges.
 
-### Phase 3: SCM Credentials (GitHub/GitLab)
+### Phase 3: Image Pull and Repository Credentials (GitHub/GitLab)
 
-**Script:** `vps/scripts/export-secrets.sh set-scm-credentials <provider>`
+**Scripts:** `vps/scripts/export-secrets.sh set-registry-credentials`, then
+`vps/scripts/export-secrets.sh set-scm-credentials <provider>`
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│              set-scm-credentials github Flow                     │
+│         set-registry-credentials, set-scm-credentials            │
 └──────────────────────────────────────────────────────────────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Prompt for the URL  │
-                   │  prefix covering the │
-                   │  organizations and   │
-                   │  the token           │
+                   │  Read-only image     │
+                   │  pull token:         │
+                   │  - argocd/ghcr-      │
+                   │    registry-secret   │
+                   │  - security/ghcr-    │
+                   │    secret            │
+                   │  - ghcr-secret of    │
+                   │    every application │
+                   │    namespace         │
                    └──────────┬───────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  Secrets in argocd:  │
+                   │  Repository token,   │
+                   │  argocd only:        │
                    │  - github-repo-creds │
                    │    (repo-creds)      │
                    │  - scm-token         │
-                   │  - ghcr-registry-    │
-                   │    secret            │
-                   │  Secret in security: │
-                   │  - ghcr-secret       │
                    └──────────────────────┘
 ```
 
-**Important:** these Secrets let Argo CD discover and pull the private repositories of every
-organization of `SCM_ORGANIZATIONS` (`github-repo-creds`, `scm-token`), the Image Updater read
-GHCR (`ghcr-registry-secret`) and Keycloak pull private extension images (`security/ghcr-secret`).
-
-One token serves every organization: on GitHub, a **classic** personal access token with the
-scopes `repo` and `read:packages` (a fine-grained token is limited to one owner, and GHCR only
-accepts classic tokens). The credential template matches repository URLs by prefix:
+**Important:** two tokens with two blast radii. The **image pull token** reaches every application
+namespace, where any chart of the application can read it: on GitHub, a classic personal access
+token with the single scope `read:packages` (GHCR only accepts classic tokens). The Image Updater
+reads GHCR and Keycloak pulls private extension images with it. The **repository token** never
+leaves the namespace `argocd`: Argo CD discovers and pulls the private repositories of every
+organization of `SCM_ORGANIZATIONS` with it (on GitHub, a classic token with the scope `repo`,
+ideally of a machine account that is a read-only member of the organizations; a fine-grained token
+is limited to one owner). The credential template matches repository URLs by prefix:
 `https://github.com/<org>` for one organization, `https://github.com/` for several.
 
 ### Phase 4: Application Onboarding
 
-**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--organization ORG] [--skip-database] [--with-cicd]`
+**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--organization ORG] [--skip-database]`
 
 `--organization` names the organization of the repository, one of `SCM_ORGANIZATIONS` (default: the first one):
 it sets the URL of the Argo CD repository Secret (`https://github.com/<org>/<app>.git`).
@@ -197,8 +205,11 @@ it sets the URL of the Argo CD repository Secret (`https://github.com/<org>/<app
                    │ Create selected ns:  │
                    │  - <app>-alpha and/or│
                    │  - <app>-prod        │
-                   │  (with ResourceQuota │
-                   │   and LimitRange)    │
+                   │  (ResourceQuota,     │
+                   │   LimitRange, Pod    │
+                   │   Security restricted│
+                   │   default Network-   │
+                   │   Policy)            │
                    └──────────┬───────────┘
                               │
                               ▼
@@ -214,29 +225,23 @@ it sets the URL of the Argo CD repository Secret (`https://github.com/<org>/<app
                    │  each namespace:     │
                    │  - <app>-db (DB creds)│
                    │  - ghcr-secret       │
-                   │    (image pull)      │
+                   │    (read-only pull)  │
                    └──────────┬───────────┘
                               │
                               ▼
                    ┌──────────────────────┐
-                   │  CI/CD access only   │
-                   │  with --with-cicd    │
-                   │  (SA & kubeconfig)   │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Save credentials to │
-                   │  /root/.k3s-secrets/ │
-                   │  <app>.env           │
+                   │  Argo CD repository  │
+                   │  Secret, then, last, │
+                   │  AppProject <app>    │
                    └──────────────────────┘
 ```
 
 **Outputs:**
 
-- Database credentials in `/root/.k3s-secrets/<app>.env`
-- Kubeconfigs in `/root/.k3s-secrets/kubeconfigs/` (with `--with-cicd`)
+- Database credentials in `/root/.k3s-secrets/<app>.env`; each database is closed to the other roles
 - Secrets created directly in namespaces (not SealedSecrets); the URLs of `<app>-db` require TLS
+- AppProject `<app>` in `argocd` (its repository, its two namespaces, no cluster-scoped resource): the
+  ApplicationSets deploy the application within 3 minutes. Without onboarding, Argo CD deploys nothing.
 
 For a production-only onboarding of a repository of the organization `other-org`:
 
@@ -493,8 +498,11 @@ referencing the Secret without `optional: true` stays in `CreateContainerConfigE
 namespaces: the NetworkPolicy of the application chart restricts its own egress.
 
 **Solution:** allow egress to every platform service the application uses: `storage` 5432 (PostgreSQL),
-`database` 6379 (Redis), `security` 8080 (Keycloak: NetworkPolicies match the pod port, not the port 80 of its
-Service) and DNS. An application sending emails also needs 587 (or 465) towards its SMTP relay.
+`security` 8080 (Keycloak: NetworkPolicies match the pod port, not the port 80 of its Service) and DNS, plus the
+pods of its own namespace it calls (its Redis, for example: caches belong to the application chart). An
+application sending emails also needs 587 (or 465) towards its SMTP relay. Inbound, the default policy of the
+onboarding only lets in the namespace itself, the gateway and Prometheus: another application reaches it only if
+its chart allows that namespace explicitly.
 
 ### 7. Rolling Update Refused by the Quota
 
@@ -504,6 +512,22 @@ new pod run together.
 **Solution:** the namespace quota limits (`vps/config/onboarding/<env>.env`) must hold twice the largest pod: lower
 the pod limits, or raise the quota and run `onboard-app.sh <app>` again.
 
+### 8. Sync Refused by the AppProject
+
+**Problem:** `... is not permitted in project <app>`: the chart holds a cluster-scoped resource (Namespace,
+ClusterRole, CRD...), a `ResourceQuota`, `LimitRange`, `Endpoints` or `EndpointSlice`, or a resource of another
+namespace.
+
+**Solution:** remove it from the chart. Namespaces, quotas and RBAC beyond the namespace belong to the platform
+(`onboard-app.sh`).
+
+### 9. HTTPRoute Refused by the Gateway
+
+**Problem:** the route status reports `NotAllowedByListeners`.
+
+**Solution:** declare the namespace of the route for its hostname in `GATEWAY_HOSTNAMES`
+(`<hostname>=<app>-<env>`), then run `setup-gateway-api.sh`.
+
 ## File Reference
 
 ### VPS Scripts (`vps/scripts/`)
@@ -512,11 +536,11 @@ the pod limits, or raise the quota and run `onboard-app.sh <app>` again.
 |------------------------|-------------------------------------------------|
 | `install.sh`           | Initial cluster setup (in `vps/`)               |
 | `setup-gateway-api.sh` | Gateway, certificates, Keycloak routes and rate limit, hairpin |
-| `apply-config.sh`      | Argo CD ApplicationSets and Image Updater CRs   |
+| `apply-config.sh`      | Argo CD ApplicationSets, Image Updater CRs, emptied `default` project |
 | `apply-keycloak.sh`    | Keycloak and its extension images (themes, providers) |
 | `apply-backups.sh`     | PostgreSQL backup CronJobs, off-site restic copy |
-| `onboard-app.sh`       | Per-application setup                           |
-| `export-secrets.sh`    | Credentials, sealing key backup, SCM access     |
+| `onboard-app.sh`       | Per-application setup, AppProject included      |
+| `export-secrets.sh`    | Credentials, sealing key backup, repository and image pull access |
 | `setup-secrets.sh`     | Infrastructure secrets, rotation, Discord, off-site backup credentials |
 | `harden-host.sh`       | Firewall, SSH and automatic updates             |
 | `k3s-maintenance.sh`   | K3s backups, restores and upgrades              |
@@ -526,12 +550,10 @@ Parameters of every script: [`../README.md`](../README.md).
 
 ### Example applications
 
-Two public repositories illustrate the two common kinds of applications:
-
-- [DevDeNiro/coterie-webapp-alpha](https://github.com/DevDeNiro/coterie-webapp-alpha): Java server-side monolith
-  (Spring Boot / Kotlin, HTML rendered with HTMX) using PostgreSQL, Redis and Keycloak;
 - [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit): client application (React / Vite
   build served by nginx), without database (`onboard-app.sh <app> --skip-database`).
+- A server-side application (Spring Boot, for example) follows the same layout, with its database onboarded,
+  Keycloak reached through its realm, and its cache, if any, in its own chart.
 
 The auto-discovery deploys a repository of one of the organizations of `SCM_ORGANIZATIONS` once it follows the layout
 below: a chart in `helm/<repository>/` with `values-prod.yaml` (and `values-alpha.yaml` with a `develop` branch), a
@@ -555,6 +577,8 @@ below: a chart in `helm/<repository>/` with `values-prod.yaml` (and `values-alph
 | `vps/values/argocd.yaml`                      | Argo CD Helm values             |
 | `vps/templates/argocd/applicationsets.yaml.tpl` | Dynamic app generation from Git |
 | `vps/templates/argocd/generator-{alpha,prod}.yaml.tpl` | One SCM generator per organization |
+| `vps/templates/onboarding/appproject.yaml.tpl` | AppProject of an application (`onboard-app.sh`) |
+| `vps/manifests/argocd-default-project.yaml`   | Emptied `default` project       |
 | `vps/manifests/argocd-image-updaters.yaml`    | Image Updater CRs (alpha, prod) |
 
 ## Quick Reference Commands

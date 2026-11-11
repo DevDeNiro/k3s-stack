@@ -25,7 +25,6 @@ CLUSTER_NAME="dev-cluster"
 LOCAL_AUTH_HOST="auth.localhost"
 
 INSTALL_POSTGRESQL=true
-INSTALL_REDIS=true
 INSTALL_ARGOCD=true
 INSTALL_KEYCLOAK=false
 INSTALL_MONITORING=false
@@ -37,13 +36,12 @@ usage() {
         "" \
         "Creates the k3d cluster '${CLUSTER_NAME}' and installs the VPS mirror stack." \
         "" \
-        "  --minimal          Gateway API, PostgreSQL, Redis, Argo CD, Sealed Secrets (default)" \
+        "  --minimal          Gateway API, PostgreSQL, Argo CD, Sealed Secrets (default)" \
         "  --all              everything, Keycloak and Prometheus/Grafana included" \
         "  --with-keycloak    Keycloak in namespace security (~1GB RAM), routed on http://${LOCAL_AUTH_HOST}" \
         "  --with-monitoring  Prometheus and Grafana in namespace monitoring" \
         "  --skip-argocd      no Argo CD" \
         "  --skip-postgres    no PostgreSQL (incompatible with Keycloak)" \
-        "  --skip-redis       no Redis" \
         "  --recreate         delete and recreate the cluster when it exists" \
         "  -y, --yes          no confirmation prompt (with --recreate)" \
         "  -h, --help         this help" \
@@ -62,7 +60,6 @@ parse_args() {
             --with-monitoring) INSTALL_MONITORING=true ;;
             --skip-argocd) INSTALL_ARGOCD=false ;;
             --skip-postgres) INSTALL_POSTGRESQL=false ;;
-            --skip-redis) INSTALL_REDIS=false ;;
             --recreate) FORCE_RECREATE=true ;;
             -y|--yes) ASSUME_YES=true ;;
             -h|--help) usage; exit 0 ;;
@@ -146,13 +143,6 @@ install_postgresql() {
         -f "$VPS_VALUES_DIR/postgresql-image.yaml" \
         --wait --timeout 5m
     ok "PostgreSQL: postgresql.storage.svc.cluster.local:5432"
-}
-
-install_redis() {
-    [[ "$INSTALL_REDIS" == "true" ]] || return 0
-    step "Redis (namespace database)"
-    kubectl apply -f "$SCRIPT_DIR/manifests/redis.yaml"
-    kubectl wait --for=condition=available deployment/redis -n database --timeout=120s >/dev/null
 }
 
 install_sealed_secrets() {
@@ -249,7 +239,6 @@ print_summary() {
     echo "Context     : $(kubectl config current-context) (KUBECONFIG=$KUBECONFIG)"
     echo "Gateway     : infrastructure-gateway (namespace nginx-gateway), http://localhost"
     echo "PostgreSQL  : postgresql.storage.svc.cluster.local:5432 (password: local/postgres_password.txt)"
-    echo "Redis       : redis.database.svc.cluster.local:6379"
     if [[ "$INSTALL_ARGOCD" == "true" ]]; then
         echo "Argo CD     : kubectl port-forward -n argocd svc/argocd-server 8443:80 -> http://localhost:8443"
     fi
@@ -272,7 +261,6 @@ main() {
     kubectl apply -f "$SCRIPT_DIR/manifests/namespaces.yaml"
     install_gateway_api
     install_postgresql
-    install_redis
     install_sealed_secrets
     install_keycloak
     install_argocd

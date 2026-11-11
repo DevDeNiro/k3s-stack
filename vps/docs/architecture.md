@@ -7,9 +7,31 @@ Chaque application onboardée via `onboard-app.sh` dispose de :
 | Ressource       | Alpha         | Prod                     |
 |-----------------|---------------|--------------------------|
 | Namespace       | `<app>-alpha` | `<app>-prod`             |
+| Pod Security    | `restricted`  | `restricted`             |
+| NetworkPolicy par défaut | `k3s-stack-default-ingress` | `k3s-stack-default-ingress` |
 | Database        | `<app>-alpha` | `<app>-prod`             |
 | User PostgreSQL | `<app>-alpha` | `<app>-prod`             |
+| AppProject Argo CD | `<app>` (commun) | `<app>` (commun)   |
 | Backup auto     | ❌             | ✅ (daily/weekly/monthly, copie hors site optionnelle) |
+
+### Cloisonnement entre applications
+
+Une application n'accède qu'à ce que son onboarding lui donne :
+
+- **Argo CD** : son AppProject n'autorise que son dépôt et ses deux namespaces, aucune
+  ressource de niveau cluster, ni `ResourceQuota`, `LimitRange`, `Endpoints` ou
+  `EndpointSlice`. Argo CD ne crée ni projet ni namespace : sans onboarding, rien n'est
+  déployé. Le projet `default` est vidé.
+- **Réseau** : ses pods n'acceptent que les connexions de sa namespace, de la passerelle et
+  de Prometheus ; `monitoring` et `argocd` n'acceptent que leurs propres pods.
+- **Passerelle** : chaque hostname appartient aux namespaces déclarées dans
+  `GATEWAY_HOSTNAMES` (`<hostname>=<namespace>`) ; une route d'une autre namespace est
+  refusée.
+- **Données** : son rôle PostgreSQL ne se connecte qu'à sa base, son realm Keycloak lui
+  est propre ; un cache (Redis) vit dans son chart, dans sa namespace.
+- **Secrets** : tout chart lit les Secrets de sa namespace ; ils ne contiennent que ses
+  identifiants et un jeton de lecture des images. Aucun identifiant d'administration de la
+  plateforme (realm `master`, Argo CD, superutilisateur PostgreSQL) n'y est déposé.
 
 ### Workflow Git → Environnement
 
@@ -25,13 +47,15 @@ contenant `helm/` : un dépôt sans `develop` n'a qu'un environnement de product
 ### Plusieurs organisations GitHub
 
 Les ApplicationSets ont un générateur SCM par organisation de `SCM_ORGANIZATIONS`
-(`config.env`), avec un seul token (`export-secrets.sh set-scm-credentials`). Chaque
-générateur porte le chemin des images de son organisation (`values.imageBase`) :
+(`config.env`), avec un jeton de dépôt pour toutes (`export-secrets.sh set-scm-credentials`,
+namespace `argocd` seulement) et un jeton de lecture des images pour toutes
+(`export-secrets.sh set-registry-credentials`, copié dans chaque namespace applicative).
+Chaque générateur porte le chemin des images de son organisation (`values.imageBase`) :
 `REGISTRY_HOST/<organisation en minuscules>`, ou `REGISTRY_BASE` pour une organisation
 unique. Les chemins GHCR sont en minuscules ; les noms de dépôt doivent être en
-minuscules et uniques entre les organisations (ils nomment les Applications et les
-namespaces). `onboard-app.sh --organization <org>` crée le Secret de dépôt Argo CD du
-bon `<org>/<app>`.
+minuscules et uniques entre les organisations (ils nomment les Applications, les
+AppProjects et les namespaces). `onboard-app.sh --organization <org>` crée le Secret de
+dépôt Argo CD et l'AppProject du bon `<org>/<app>`.
 
 ---
 
@@ -165,6 +189,11 @@ kubectl get secret keycloak-secret -n security -o jsonpath='{.data.admin-passwor
 Le mot de passe initial ne sert qu'au premier démarrage : s'il a été changé dans la
 console, utiliser le mot de passe courant.
 
+Ce compte du realm `master` administre tous les realms : il reste à l'opérateur et ne
+va jamais dans une application. Une application qui gère les utilisateurs de son realm
+utilise un client confidentiel de ce realm avec compte de service, limité aux rôles
+`realm-management` dont elle a besoin (`manage-users`, `view-users`...).
+
 ### Thèmes et providers (images d'extension)
 
 Keycloak garde l'image officielle. Les thèmes et les providers viennent d'images listées
@@ -180,7 +209,7 @@ sudo ./vps/scripts/apply-keycloak.sh       # rendu, application, redémarrage (1
 
 Une référence porte un tag immuable ou un digest : un tag n'est tiré qu'une fois par
 nœud. Les images privées utilisent le Secret `security/ghcr-secret`
-(`export-secrets.sh set-scm-credentials github`).
+(`export-secrets.sh set-registry-credentials`).
 
 ### Emails du realm et limite de débit
 

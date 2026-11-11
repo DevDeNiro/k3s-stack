@@ -33,7 +33,6 @@ ALLOW_API_FROM="${ALLOW_API_FROM:-}"
 INSTALL_CERT_MANAGER="${INSTALL_CERT_MANAGER:-true}"
 INSTALL_POSTGRESQL="${INSTALL_POSTGRESQL:-true}"
 INSTALL_KEYCLOAK="${INSTALL_KEYCLOAK:-true}"
-INSTALL_REDIS="${INSTALL_REDIS:-true}"
 INSTALL_PROMETHEUS="${INSTALL_PROMETHEUS:-true}"
 INSTALL_GRAFANA="${INSTALL_GRAFANA:-true}"
 INSTALL_LOKI="${INSTALL_LOKI:-true}"
@@ -55,8 +54,8 @@ usage() {
         "  AUTO_UPDATES                  unattended security updates [true]" \
         "  ALLOW_API_FROM                CIDRs allowed on 6443, space-separated [none]" \
         "  INSTALL_<COMPONENT>           true|false, components: CERT_MANAGER POSTGRESQL KEYCLOAK" \
-        "                                REDIS PROMETHEUS GRAFANA LOKI PROMTAIL SEALED_SECRETS" \
-        "                                ARGOCD NETWORK_POLICIES [true]"
+        "                                PROMETHEUS GRAFANA LOKI PROMTAIL SEALED_SECRETS ARGOCD" \
+        "                                NETWORK_POLICIES [true]"
 }
 
 # -----------------------------------------------------------------------------
@@ -242,17 +241,6 @@ install_keycloak() {
     bash "$SCRIPT_DIR/scripts/apply-keycloak.sh" --no-restart
 }
 
-install_redis() {
-    if [[ "$INSTALL_REDIS" != "true" ]]; then
-        warn "Skipping Redis (INSTALL_REDIS=false)"
-        return 0
-    fi
-    step "Installing Redis"
-    kubectl apply -f "$VPS_MANIFESTS_DIR/redis.yaml"
-    kubectl rollout status deployment/redis -n database --timeout=120s \
-        || warn "Redis is still starting: kubectl get pods -n database"
-}
-
 # -----------------------------------------------------------------------------
 # Observability
 # -----------------------------------------------------------------------------
@@ -400,7 +388,6 @@ main() {
     install_postgresql
     create_keycloak_database
     install_keycloak
-    install_redis
     install_observability
     install_sealed_secrets
     install_argocd
