@@ -59,11 +59,11 @@ installed and operated by the scripts of this directory.
 | cert-manager (Let's Encrypt HTTP-01)                                            | v1.21.3                         | `cert-manager`  | -                                                                                   |
 | PostgreSQL (Bitnami chart, image pinned by digest)                              | chart 18.12.18, PostgreSQL 18.6 | `storage`       | in-cluster, TLS available                                                           |
 | Keycloak (themes and providers from extension images)                           | 26.8.2                          | `security`      | `/realms` (rate limited) and `/resources` of `AUTH_HOSTNAMES`, master realm blocked |
-| Argo CD + Image Updater                                                         | charts 10.17.1 / 1.4.2          | `argocd`        | port-forward                                                                        |
+| Argo CD + Image Updater                                                         | charts 10.18.0 / 1.4.2          | `argocd`        | port-forward                                                                        |
 | Sealed Secrets                                                                  | chart 2.22.0                    | `kube-system`   | -                                                                                   |
-| Prometheus, Alertmanager, node-exporter, kube-state-metrics                     | chart 29.47.0                   | `monitoring`    | port-forward                                                                        |
-| Grafana                                                                         | chart 10.5.15                   | `monitoring`    | port-forward                                                                        |
-| Loki + Promtail                                                                 | charts 7.5.0 / 6.17.1           | `monitoring`    | -                                                                                   |
+| Prometheus, Alertmanager, node-exporter, kube-state-metrics                     | chart 29.47.1                   | `monitoring`    | port-forward                                                                        |
+| Grafana                                                                         | chart 14.4.1                    | `monitoring`    | port-forward                                                                        |
+| Loki + Alloy                                                                    | charts 21.2.1 / 1.15.0          | `monitoring`    | -                                                                                   |
 | PostgreSQL backups (daily, weekly, monthly)                                     | `postgres-backup/`              | `storage`       | -                                                                                   |
 | Off-site copy of the backups (optional, encrypted)                              | restic 0.19.1                   | `storage`       | S3-compatible object storage                                                        |
 
@@ -154,7 +154,7 @@ sudo ./vps/install.sh
 Installs, in order: dependencies (`iptables` before K3s), K3s from the configuration files,
 host hardening, Helm, namespaces, credentials and Secrets, NGINX Gateway Fabric,
 cert-manager and the Let's Encrypt ClusterIssuers, PostgreSQL, the Keycloak database and
-Keycloak (`apply-keycloak.sh`), Prometheus, Grafana, Loki, Promtail, Sealed Secrets,
+Keycloak (`apply-keycloak.sh`), Prometheus, Grafana, Loki, Alloy, Sealed Secrets,
 Argo CD with the Image Updater and the GitOps configuration (`apply-config.sh`), the backup
 CronJobs (`apply-backups.sh`) and the NetworkPolicies.
 It takes no argument; its environment variables:
@@ -165,9 +165,12 @@ It takes no argument; its environment variables:
 | `INSTALL_FIREWALL`                                                                                                                                                                                                    | `true`                | run `harden-host.sh --apply` (UFW)                      |
 | `AUTO_UPDATES`                                                                                                                                                                                                        | `true`                | unattended security updates                             |
 | `ALLOW_API_FROM`                                                                                                                                                                                                      | empty                 | space-separated CIDRs allowed on 6443                   |
-| `INSTALL_CERT_MANAGER`, `INSTALL_POSTGRESQL`, `INSTALL_KEYCLOAK`, `INSTALL_PROMETHEUS`, `INSTALL_GRAFANA`, `INSTALL_LOKI`, `INSTALL_PROMTAIL`, `INSTALL_SEALED_SECRETS`, `INSTALL_ARGOCD`, `INSTALL_NETWORK_POLICIES` | `true`                | `false` skips the component (Keycloak needs PostgreSQL) |
+| `INSTALL_CERT_MANAGER`, `INSTALL_POSTGRESQL`, `INSTALL_KEYCLOAK`, `INSTALL_PROMETHEUS`, `INSTALL_GRAFANA`, `INSTALL_LOKI`, `INSTALL_ALLOY`, `INSTALL_SEALED_SECRETS`, `INSTALL_ARGOCD`, `INSTALL_NETWORK_POLICIES` | `true`                | `false` skips the component (Keycloak needs PostgreSQL) |
 
 When K3s is already installed, its configuration is left untouched (reinstall to change it).
+The old `INSTALL_PROMTAIL` flag remains a fallback for `INSTALL_ALLOY`; the new flag takes
+precedence. A running Promtail release must be migrated explicitly before installing Alloy:
+see [observability migration](docs/observability.md#notes-for-vps-upgrades).
 
 ### `uninstall.sh`
 
@@ -475,9 +478,17 @@ Port-forwards enter the pod network namespace: the NetworkPolicies do not apply 
 ## Checks
 
 ```bash
-make lint       # ShellCheck on every script (settings: .shellcheckrc)
-make helm-test  # Helm lint and template of the repository charts
+make lint                # ShellCheck on every script (settings: .shellcheckrc)
+make helm-test           # Helm lint and template of the repository charts
+make helm-external-test  # external VPS/local charts (Helm, Ruby and network required)
+make alloy-test          # synthetic Alloy logs and positions (Python 3, Docker, cached image)
 ```
+
+The external test isolates Helm's configuration, renders without accessing a cluster and
+checks key PVCs, selectors, Secret references, CRDs and Alloy permissions. It does not
+prove runtime compatibility or a safe upgrade of an existing release.
+The Alloy test uses only synthetic data and the cached image `grafana/alloy:v1.21.3`
+inside a container without network access.
 
 ## Troubleshooting
 
@@ -620,12 +631,12 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
    kubectl get applicationsets,applications -n argocd
    ```
 
-4. **Logs**: redaction stages of Promtail, then JSON access logs without query strings (NGINX reloads, no downtime).
-   Pinned chart versions:
+4. **Logs**: migrate Promtail to Alloy and verify redaction using the
+   [observability migration procedure](docs/observability.md#notes-for-vps-upgrades),
+   then enable JSON access logs without query strings (NGINX reloads, no downtime):
 
    ```bash
    source vps/config/versions.env
-   helm upgrade promtail grafana/promtail --version "$PROMTAIL_CHART_VERSION" -n monitoring -f vps/values/promtail.yaml
    helm upgrade nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version "$NGINX_GATEWAY_FABRIC_VERSION" \
        -n nginx-gateway -f vps/values/nginx-gateway-fabric.yaml --wait
    ```

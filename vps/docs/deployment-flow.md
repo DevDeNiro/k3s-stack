@@ -137,7 +137,7 @@ running applications with ArgoCD GitOps.
   (`KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST`, `429` above the burst); the login
   assets are not limited
 - The gateway access logs carry the path without the query string (OAuth codes and states
-  never logged); Promtail masks the tokens of `/stop/<token>` paths before Loki
+  never logged); Alloy masks the tokens of `/stop/<token>` paths before Loki
 - Applications attach their own HTTPRoutes to `infrastructure-gateway` (namespace
   `nginx-gateway`). Each hostname is declared in `GATEWAY_HOSTNAMES` with the namespace
   allowed to route it (`<hostname>=<namespace>`): its HTTPS listener refuses the routes of

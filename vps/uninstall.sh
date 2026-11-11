@@ -23,6 +23,7 @@ RELEASES=(
     argocd-image-updater:argocd
     argocd:argocd
     sealed-secrets:kube-system
+    alloy:monitoring
     promtail:monitoring
     loki:monitoring
     grafana:monitoring

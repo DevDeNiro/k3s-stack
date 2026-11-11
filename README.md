@@ -16,7 +16,7 @@ Kubernetes platform for a **single VPS**, with a **local k3d mirror** for develo
 - **Applications isolated from each other**: each one gets its namespaces (Pod Security
   `restricted`, quota, default NetworkPolicy), its database role, its Argo CD project and its
   public hostnames; caches such as Redis live in the application chart
-- **Prometheus, Alertmanager (Discord), Loki, Promtail, Grafana**, with secrets carried by URLs
+- **Prometheus, Alertmanager (Discord), Loki, Alloy, Grafana**, with secrets carried by URLs
   masked before Loki
 
 Configuration lives in files (`vps/config`, `vps/templates`, `vps/values`), the scripts hold
@@ -73,8 +73,15 @@ k3s-stack/
 
 ```bash
 make lint           # ShellCheck on every script
-make helm-test      # Helm lint and template validation
+make helm-test      # Helm lint and template validation for repository charts
+make helm-external-test  # render and check VPS/local external charts (Helm, Ruby, network)
+make alloy-test     # offline Alloy pipeline/positions test (Python 3, Docker, cached image)
 ```
+
+External chart checks use an isolated temporary Helm configuration and never contact a
+cluster. They validate rendered resources, not live upgrades or runtime compatibility.
+`alloy-test` needs the cached official image `grafana/alloy:v1.21.3` and uses only
+synthetic logs in an isolated container.
 
 ## Cleanup
 

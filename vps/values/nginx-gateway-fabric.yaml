@@ -70,8 +70,8 @@ nginx:
   # Access logs (vps/docs/security-hardening.md): one JSON line per request, with
   # the path of the request ($uri) but never the query string (OAuth codes and
   # states, tokens passed as parameters) nor the Referer header (it carries the
-  # full URL of the previous page). Promtail masks the tokens carried by paths
-  # before Loki (values/promtail.yaml).
+  # full URL of the previous page). Alloy masks the tokens carried by paths
+  # before Loki (values/alloy.yaml).
   config:
     logging:
       accessLog:

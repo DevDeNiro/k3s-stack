@@ -1,13 +1,14 @@
 # =============================================================================
-# Loki SingleBinary Configuration for VPS (4-6GB RAM)
+# Loki Monolithic Configuration for VPS (4-6GB RAM)
 # Lightweight log aggregation - one pod, filesystem storage, 7-day retention.
 # Solves the "logs --previous disappears once pod is pruned" problem documented
 # in vps/docs/postmortem_2026-05-18_alpha_placeholder_keys.md.
 # =============================================================================
 
-# Deployment mode: single binary (vs distributed simple-scalable or microservices).
-# SingleBinary fits the constraints of a single-node VPS perfectly.
-deploymentMode: SingleBinary
+# Deployment mode: one monolithic process on the single-node VPS.
+# The community chart renamed SingleBinary to Monolithic; the singleBinary
+# values and the StatefulSet/PVC names remain unchanged.
+deploymentMode: Monolithic
 
 loki:
   auth_enabled: false
@@ -47,7 +48,7 @@ loki:
     delete_request_store: filesystem
     working_directory: /var/loki/compactor
 
-  # Reduce memory by disabling the structured-metadata feature for now
+  # Disable query-result caching for this small deployment.
   query_range:
     cache_results: false
 
@@ -68,7 +69,7 @@ singleBinary:
   extraArgs:
     - "-config.expand-env=true"
 
-# Disable distributed components (we're in SingleBinary mode)
+# Disable distributed components (we're in Monolithic mode)
 read:
   replicas: 0
 write:
@@ -83,10 +84,6 @@ gateway:
 
 # Service monitor disabled (we scrape via existing prometheus annotations)
 monitoring:
-  selfMonitoring:
-    enabled: false
-    grafanaAgent:
-      installOperator: false
   serviceMonitor:
     enabled: false
 

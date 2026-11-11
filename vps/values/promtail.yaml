@@ -1,5 +1,6 @@
 # =============================================================================
-# Promtail DaemonSet - tails /var/log/pods/*.log and ships to Loki SingleBinary
+# Historical Promtail values retained as the source for the Alloy migration.
+# Promtail is end-of-life and is no longer installed by vps/install.sh.
 # Runs on every node (only one node in the VPS deployment).
 # =============================================================================
 

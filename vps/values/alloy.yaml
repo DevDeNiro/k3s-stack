@@ -1,0 +1,194 @@
+# Promtail 6.17.1's complete rendered configuration, converted with Alloy
+# 1.21.3. Keep the discovery/relabel rules and redaction stages together.
+alloy:
+  storagePath: /var/lib/alloy
+  enableReporting: false
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "25m"
+    limits:
+      memory: "128Mi"
+      cpu: "100m"
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  mounts:
+    extra:
+      - name: pods
+        mountPath: /var/log/pods
+        readOnly: true
+      - name: containers
+        mountPath: /var/lib/docker/containers
+        readOnly: true
+      - name: promtail-positions
+        mountPath: /run/promtail
+        readOnly: true
+      - name: alloy-data
+        mountPath: /var/lib/alloy
+  configMap:
+    content: |-
+      discovery.kubernetes "kubernetes_pods" {
+        role = "pod"
+        // The chart sets HOSTNAME to spec.nodeName via the downward API.
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+        }
+      }
+
+      loki.process "kubernetes_pods" {
+        forward_to = [loki.write.default.receiver]
+
+        stage.cri {}
+        stage.docker {}
+        stage.replace {
+          expression = "/stop/([^\\s?\"#]+)"
+          replace    = "<redacted>"
+        }
+        stage.replace {
+          expression = "[?&](?:code|state|session_state|id_token_hint)=([^&\\s\"#]+)"
+          replace    = "<redacted>"
+        }
+        stage.match {
+          selector            = "{namespace=\"kube-system\",container=~\"local-path-provisioner|metrics-server\"}"
+          action              = "drop"
+          drop_counter_reason = "noisy_system"
+        }
+      }
+
+      discovery.relabel "kubernetes_pods" {
+        targets = discovery.kubernetes.kubernetes_pods.targets
+        rule {
+          source_labels = ["__meta_kubernetes_pod_controller_name"]
+          regex         = "([0-9a-z-.]+?)(-[0-9a-f]{8,10})?"
+          target_label  = "__tmp_controller_name"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name", "__meta_kubernetes_pod_label_app", "__tmp_controller_name", "__meta_kubernetes_pod_name"]
+          regex         = "^;*([^;]+)(;.*)?$"
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_instance", "__meta_kubernetes_pod_label_instance"]
+          regex         = "^;*([^;]+)(;.*)?$"
+          target_label  = "instance"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component", "__meta_kubernetes_pod_label_component"]
+          regex         = "^;*([^;]+)(;.*)?$"
+          target_label  = "component"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node_name"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["namespace", "app"]
+          separator     = "/"
+          target_label  = "job"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotationpresent_kubernetes_io_config_hash", "__meta_kubernetes_pod_annotation_kubernetes_io_config_hash", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          regex         = "true/(.*)"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+      }
+
+      loki.source.file "kubernetes_pods" {
+        targets               = discovery.relabel.kubernetes_pods.output
+        forward_to            = [loki.process.kubernetes_pods.receiver]
+        legacy_positions_file = "/run/promtail/positions.yaml"
+        file_match {
+          enabled = true
+        }
+      }
+
+      loki.write "default" {
+        endpoint {
+          url                = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+          min_backoff_period = "500ms"
+          max_backoff_period = "5m"
+          max_backoff_retries = 10
+        }
+        external_labels = {}
+      }
+
+controller:
+  type: daemonset
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+  podLabels:
+    app: alloy
+    component: log-collector
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "12345"
+    prometheus.io/path: /metrics
+  volumes:
+    extra:
+      - name: pods
+        hostPath:
+          path: /var/log/pods
+      - name: containers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: promtail-positions
+        hostPath:
+          path: /run/promtail
+          type: DirectoryOrCreate
+      - name: alloy-data
+        hostPath:
+          path: /var/lib/alloy
+          type: DirectoryOrCreate
+
+# Pod discovery requires no access to Secrets, ConfigMaps or other API objects.
+rbac:
+  rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["list", "watch"]
+  # The chart concatenates both lists into one ClusterRole and renders an empty
+  # list as invalid YAML, so keep the remaining pod permission in this list.
+  clusterRules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get"]
+
+# Keep automatic config reloads, including changes to redaction, within the VPS budget.
+configReloader:
+  resources:
+    requests:
+      memory: "16Mi"
+      cpu: "10m"
+    limits:
+      memory: "32Mi"
+      cpu: "100m"

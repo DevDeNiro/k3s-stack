@@ -135,7 +135,7 @@ install_postgresql() {
     password=$(local_password postgres_password.txt)
     apply_secret storage postgresql-secret "postgres-password=$password"
     # VPS configuration (TLS, pg_hba, tuning), then the local differences
-    helm upgrade --install postgresql bitnami/postgresql \
+    helm upgrade --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
         --version "$POSTGRESQL_CHART_VERSION" \
         --namespace storage \
         -f "$VPS_VALUES_DIR/postgresql.yaml" \
@@ -227,7 +227,7 @@ install_monitoring() {
         --namespace monitoring \
         -f "$SCRIPT_DIR/values/prometheus.yaml" \
         --wait --timeout 5m
-    helm upgrade --install grafana grafana/grafana \
+    helm upgrade --install grafana grafana-community/grafana \
         --version "$GRAFANA_CHART_VERSION" \
         --namespace monitoring \
         -f "$SCRIPT_DIR/values/grafana.yaml" \

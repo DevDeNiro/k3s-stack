@@ -6,7 +6,7 @@ This directory holds the **infrastructure namespaces**, applied by `vps/install.
 |-----------|------|------------------------|-----|
 | `storage` | `infrastructure.yaml` | baseline | PostgreSQL, backups |
 | `security` | `infrastructure.yaml` | baseline | Keycloak |
-| `monitoring` | `infrastructure.yaml` | privileged | node-exporter (hostNetwork, hostPID) and Promtail (hostPath) |
+| `monitoring` | `infrastructure.yaml` | privileged | node-exporter (hostNetwork, hostPID) and Alloy (hostPath) |
 | `argocd` | `gitops.yaml` | baseline | Argo CD, Image Updater |
 | `cert-manager` | `cert-manager.yaml` | baseline | cert-manager |
 | `nginx-gateway` | `nginx-gateway.yaml` | privileged | NGINX data plane on hostPorts 80/443 |

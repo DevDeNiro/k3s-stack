@@ -1,6 +1,6 @@
 # Makefile for K3s Stack Development
 
-.PHONY: help lint helm-test helm-lint helm-template local-install local-deploy-app local-uninstall
+.PHONY: help lint helm-test helm-external-test alloy-test helm-lint helm-template local-install local-deploy-app local-uninstall
 
 SHELL_SCRIPTS := $(shell find vps local -type f -name '*.sh' | sort)
 SHELLCHECK_IMAGE := koalaman/shellcheck:stable
@@ -24,6 +24,8 @@ help:
 	@echo "  Checks:"
 	@echo "    lint            - ShellCheck on every script (local binary or Docker image)"
 	@echo "    helm-test       - Run Helm lint and template validation"
+	@echo "    helm-external-test - Render external VPS/local charts (network, Helm and Ruby required)"
+	@echo "    alloy-test      - Test redaction and positions offline (Python 3 and Docker required)"
 	@echo "    helm-lint       - Run Helm lint on charts"
 	@echo "    helm-template   - Generate and validate Helm templates"
 
@@ -50,6 +52,14 @@ local-uninstall:
 # Helm checks: lint every chart, render the installable ones
 helm-test: helm-lint helm-template
 	@echo "Helm tests completed successfully!"
+
+# Chart repositories and OCI downloads are isolated from the user's Helm config.
+helm-external-test:
+	@bash vps/scripts/test-external-charts.sh
+
+# Uses only synthetic logs and a cached official Alloy image, without networking.
+alloy-test:
+	@python3 vps/scripts/test-alloy.py vps/values/alloy.yaml
 
 helm-lint:
 	@echo "Running Helm lint..."

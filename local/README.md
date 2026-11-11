@@ -151,9 +151,9 @@ application HTTPRoutes: add them to `/etc/hosts` (`127.0.0.1 <hostname>`), excep
 | NGINX Gateway Fabric | 2.8.1 | same | `local/manifests/infrastructure-gateway.yaml`: HTTP listener only |
 | PostgreSQL | chart 18.12.18, image digest of the VPS | same | `vps/values/postgresql.yaml` then `local/values/postgresql.yaml` |
 | Keycloak | 26.8.2, same template, routes and rate limit | same | HTTP on `auth.localhost` instead of HTTPS; extension images from `KEYCLOAK_EXTENSION_IMAGES` of the environment |
-| Argo CD | chart 10.17.1 | same | |
+| Argo CD | chart 10.18.0 | same | |
 | Sealed Secrets | chart 2.22.0 | same | |
-| Prometheus / Grafana | charts 29.47.0 / 10.5.15 | same (plus Loki, Promtail, Alertmanager rules) | `local/values/` |
+| Prometheus / Grafana | charts 29.47.1 / 14.4.1 | same (plus Loki, Alloy, Alertmanager rules) | `local/values/` |
 
 Local exceptions: no firewall, no TLS on the Gateway (no cert-manager), no audit log, no
 NetworkPolicies, no Pod Security labels, no Argo CD projects per application (`deploy-app.sh`

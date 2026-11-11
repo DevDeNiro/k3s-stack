@@ -6,8 +6,8 @@ The k3s-stack ships a complete observability stack tuned for a 4-6 GB VPS:
 |-----------|------|--------|--------------------|
 | Prometheus | Metrics scrape + alerting rules | ~320 Mi (limit 768 Mi) | 5 Gi |
 | Alertmanager | Alert routing + grouping | ~64 Mi | 1 Gi |
-| Loki (SingleBinary) | Log aggregation, LogQL queries | ~256 Mi | 5 Gi |
-| Promtail (DaemonSet) | Ships `/var/log/pods/*.log` to Loki | ~128 Mi | - |
+| Loki (Monolithic) | Log aggregation, LogQL queries | ~256 Mi | 5 Gi |
+| Alloy (DaemonSet) | Ships `/var/log/pods/*.log` to Loki | limit 128 Mi + 32 Mi reloader | node-local positions |
 | Grafana | Dashboards + Explore (Prom + Loki + AM) | ~256 Mi | 2 Gi |
 | Node Exporter | Host metrics | ~64 Mi | - |
 | kube-state-metrics | K8s object metrics | ~64 Mi | - |
@@ -137,7 +137,7 @@ The NGINX data plane writes one JSON line per request (`vps/values/nginx-gateway
 `status`, `body_bytes_sent`, `request_time`, `upstream_status`, `upstream_response_time`, `user_agent`. The
 query string and the Referer header are never logged: they carry OAuth codes, states and tokens.
 
-Before Loki, two Promtail `replace` stages (`vps/values/promtail.yaml`) mask, in the lines of every pod, the token
+Before Loki, two Alloy `replace` stages (`vps/values/alloy.yaml`) mask, in the lines of every pod, the token
 of `/stop/<token>` paths and the values of the `code`, `state`, `session_state` and `id_token_hint` query
 parameters (`<redacted>`). The raw lines stay in the node files (`/var/log/pods/`) until the kubelet rotates them:
 see [`security-hardening.md`](security-hardening.md).
@@ -155,16 +155,77 @@ sum by (path) (count_over_time({namespace="nginx-gateway"} | json | status=~"401
 
 ## Notes for VPS upgrades
 
-Chart versions are pinned in `vps/config/versions.env`; `install.sh` applies them. To
-apply a values change on a running installation, use the pinned version:
+Chart versions in `vps/config/versions.env` are defaults for new installations, not proof
+of the versions currently running. **Do not rerun the fresh-server installer as a
+migration procedure.** Record the installed release revisions and custom values, check
+release notes, back up all affected persistent volumes and test restores and upgrades on
+an isolated copy first. In particular, verify that PostgreSQL dumps contain every expected
+database: a backup job can currently succeed despite a failed individual dump.
+
+Grafana and Loki now use the `grafana-community` repository; Alloy remains in `grafana`.
+The Grafana chart uses a distroless image and a read-only filesystem. Validate plugins,
+dashboards and authentication in the test environment before changing production.
+
+Loki's community chart calls the former `SingleBinary` deployment mode `Monolithic`
+while retaining the `singleBinary` values key. The rendered StatefulSet, services and
+PVC template have the same names and selectors with the values in this repository, but
+that does **not** prove a live upgrade or rollback is safe. Preserve the existing Loki PVC
+and schema, test data readability and ingestion on a restored copy, and follow the
+[official community migration guide](https://grafana.com/docs/loki/latest/setup/upgrade/upgrade-to-community/).
+Do not delete a PVC to resolve a schema or upgrade error.
+
+After that preparation, configure the repositories and use the pinned chart versions for
+the components individually, checking each rollout before proceeding:
 
 ```bash
 source vps/config/versions.env
+helm repo add grafana https://grafana.github.io/helm-charts --force-update
+helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update
+helm repo update
 helm upgrade prometheus prometheus-community/prometheus --version "$PROMETHEUS_CHART_VERSION" -n monitoring -f vps/values/prometheus.yaml
-helm upgrade grafana grafana/grafana --version "$GRAFANA_CHART_VERSION" -n monitoring -f vps/values/grafana.yaml
-helm upgrade loki grafana/loki --version "$LOKI_CHART_VERSION" -n monitoring -f vps/values/loki.yaml
-helm upgrade promtail grafana/promtail --version "$PROMTAIL_CHART_VERSION" -n monitoring -f vps/values/promtail.yaml
+helm upgrade grafana grafana-community/grafana --version "$GRAFANA_CHART_VERSION" -n monitoring -f vps/values/grafana.yaml
+helm upgrade loki grafana-community/loki --version "$LOKI_CHART_VERSION" -n monitoring -f vps/values/loki.yaml
 ```
+
+### Promtail to Alloy cutover
+
+Promtail is end-of-life. The complete Promtail chart configuration was converted to
+`vps/values/alloy.yaml`, including pod discovery, labels, CRI/Docker stages, redaction,
+the noisy-pod filter and retries. The chart exposes different Alloy metrics: review any
+Promtail-specific alerts or dashboards.
+
+The historical pipeline applies `cri` and then `docker` to every line. An application
+JSON message containing a `log` field may therefore be interpreted as a Docker envelope:
+other fields can disappear and its timestamp or stream can change. This inherited
+behavior is retained for compatibility; test application log formats before cutover.
+
+Plan a maintenance window and rehearse on a restored isolated copy first:
+
+1. Compare the actual Promtail release, values, and log paths with the historical
+   `vps/values/promtail.yaml`. Back up the configuration and each node's
+   `/run/promtail/positions.yaml` securely; `/run` is volatile across node reboots.
+   Verify Loki health, available disk and node log retention. Prepare a rollback using
+   the actual old chart/version and values.
+2. Stop Promtail and wait for termination **before** starting Alloy; overlapping both
+   collectors can duplicate logs. For the historical release:
+   `helm uninstall promtail -n monitoring --wait`. This removes the release, not the
+   node's hostPath positions file. Allow for a collection gap during the cutover.
+3. Install Alloy using the repository and pinned version above:
+   `helm upgrade --install alloy grafana/alloy --version "$ALLOY_CHART_VERSION" -n monitoring -f vps/values/alloy.yaml --wait`.
+   Alloy reads `/run/promtail/positions.yaml` only when its own positions do not exist;
+   its new positions persist in node-local `/var/lib/alloy`. If Alloy has already run,
+   investigate and back up its state before the cutover: an existing positions file
+   takes precedence, so legacy positions will not be reimported automatically.
+4. Check the Alloy rollout and logs, compare stream labels and recent entries in Loki,
+   and verify both masking rules with **synthetic, non-secret** log lines. Check metrics,
+   memory and the noisy-pod filter. Keep backups until recovery is verified.
+
+Positions are offsets, not acknowledgements of delivery: shutdown, buffered batches,
+rotation, missing files or a restart may still cause duplicates or missing lines.
+If no valid legacy or Alloy positions exist, files are read from their beginning.
+On failure, stop Alloy before restoring Promtail; Promtail cannot read Alloy's positions,
+so restoring its old positions can replay or miss logs. Neither the installer nor this
+procedure removes persistent log data automatically.
 
 NetworkPolicies (`vps/manifests/network-policies.yaml`): Prometheus reaches every pod
 (scrape targets, Alertmanager) and the node (Kubernetes API 6443, kubelet 10250,
@@ -177,15 +238,11 @@ applies to new connections only: after changing one, restart the pods it selects
 testing.
 
 Known items to review:
-- Promtail is end-of-life: migrate the log shipping to Grafana Alloy.
+- cert-manager 1.21's documented Kubernetes support ends at 1.36; K3s 1.37 is not yet
+  in its support matrix. Sealed Secrets CI also lists 1.33–1.36, and kube-state-metrics
+  2.20 targets Kubernetes 1.36. Successful Helm rendering is not runtime support.
 - On arm64 servers, the default `prometheus-config-reloader` v0.95.1 image does not exist:
   reuse the override of `local/values/prometheus.yaml`.
-
-To wipe Loki storage (if schemas conflict after a major version bump):
-```bash
-kubectl delete pvc -n monitoring -l app.kubernetes.io/name=loki
-```
-(then re-run `helm upgrade loki ...`).
 
 ## Architecture diagram
 
@@ -197,7 +254,7 @@ kubectl delete pvc -n monitoring -l app.kubernetes.io/name=loki
                    │                          │      │
                    │                          ▼      │
                    │                   ┌──────────┐  │
-                   │                   │ Promtail │  │
+                   │                   │  Alloy   │  │
                    │                   │ DaemonSet│  │
                    │                   └─────┬────┘  │
                    │                         │       │

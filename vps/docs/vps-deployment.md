@@ -16,7 +16,7 @@ application (`my-app` dans les exemples). La référence des scripts et de leurs
 | IAM | Keycloak 26.8.2 | `security` | un realm par environnement |
 | GitOps | Argo CD + Image Updater | `argocd` | déploiement continu depuis Git |
 | Secrets versionnés | Sealed Secrets | `kube-system` | déchiffrement dans le cluster |
-| Observabilité | Prometheus, Alertmanager, Loki, Promtail, Grafana | `monitoring` | métriques, alertes, logs |
+| Observabilité | Prometheus, Alertmanager, Loki, Alloy, Grafana | `monitoring` | métriques, alertes, logs |
 
 Les applications sont cloisonnées entre elles : chacune a ses namespaces (Pod Security
 `restricted`, quota, NetworkPolicy par défaut), son rôle PostgreSQL, son AppProject Argo CD
@@ -63,7 +63,7 @@ sudo ./vps/install.sh
 Environ 15 minutes. Le pare-feu est activé pendant l'installation (SSH, 80 et 443
 ouverts, API Kubernetes fermée) et les mots de passe sont générés dans
 `/root/.k3s-secrets/credentials.env` (`sudo ./vps/scripts/export-secrets.sh show`).
-Pour ne pas installer un composant : `sudo INSTALL_LOKI=false INSTALL_PROMTAIL=false ./vps/install.sh`.
+Pour ne pas installer un composant : `sudo INSTALL_LOKI=false INSTALL_ALLOY=false ./vps/install.sh`.
 
 ## Étape 3 : sauvegarder la clé Sealed Secrets
 

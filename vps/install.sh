@@ -36,7 +36,8 @@ INSTALL_KEYCLOAK="${INSTALL_KEYCLOAK:-true}"
 INSTALL_PROMETHEUS="${INSTALL_PROMETHEUS:-true}"
 INSTALL_GRAFANA="${INSTALL_GRAFANA:-true}"
 INSTALL_LOKI="${INSTALL_LOKI:-true}"
-INSTALL_PROMTAIL="${INSTALL_PROMTAIL:-true}"
+# Preserve the old opt-out for existing automation; INSTALL_ALLOY takes precedence.
+INSTALL_ALLOY="${INSTALL_ALLOY:-${INSTALL_PROMTAIL:-true}}"
 INSTALL_SEALED_SECRETS="${INSTALL_SEALED_SECRETS:-true}"
 INSTALL_ARGOCD="${INSTALL_ARGOCD:-true}"
 INSTALL_NETWORK_POLICIES="${INSTALL_NETWORK_POLICIES:-true}"
@@ -54,7 +55,7 @@ usage() {
         "  AUTO_UPDATES                  unattended security updates [true]" \
         "  ALLOW_API_FROM                CIDRs allowed on 6443, space-separated [none]" \
         "  INSTALL_<COMPONENT>           true|false, components: CERT_MANAGER POSTGRESQL KEYCLOAK" \
-        "                                PROMETHEUS GRAFANA LOKI PROMTAIL SEALED_SECRETS ARGOCD" \
+        "                                PROMETHEUS GRAFANA LOKI ALLOY SEALED_SECRETS ARGOCD" \
         "                                NETWORK_POLICIES [true]"
 }
 
@@ -208,7 +209,7 @@ install_postgresql() {
         return 0
     fi
     step "Installing PostgreSQL"
-    helm upgrade --install postgresql bitnami/postgresql \
+    helm upgrade --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
         --version "$POSTGRESQL_CHART_VERSION" \
         --namespace storage \
         -f "$VPS_VALUES_DIR/postgresql.yaml" \
@@ -260,13 +261,19 @@ helm_install() {
 }
 
 install_observability() {
+    # Do not run two independent collectors for the same files. The operator must
+    # explicitly stop Promtail and follow the positions cutover procedure first.
+    if [[ "$INSTALL_LOKI" == "true" && "$INSTALL_ALLOY" == "true" ]] &&
+        helm status promtail --namespace monitoring >/dev/null 2>&1; then
+        die "Promtail is still installed; follow vps/docs/observability.md before installing Alloy"
+    fi
     # 10m: the server Deployment is recreated with a 300 s termination grace period
     helm_install INSTALL_PROMETHEUS prometheus prometheus-community/prometheus \
         "$PROMETHEUS_CHART_VERSION" prometheus.yaml 10m
-    helm_install INSTALL_GRAFANA grafana grafana/grafana "$GRAFANA_CHART_VERSION" grafana.yaml 5m
-    helm_install INSTALL_LOKI loki grafana/loki "$LOKI_CHART_VERSION" loki.yaml 5m
+    helm_install INSTALL_GRAFANA grafana grafana-community/grafana "$GRAFANA_CHART_VERSION" grafana.yaml 5m
+    helm_install INSTALL_LOKI loki grafana-community/loki "$LOKI_CHART_VERSION" loki.yaml 5m
     if [[ "$INSTALL_LOKI" == "true" ]]; then
-        helm_install INSTALL_PROMTAIL promtail grafana/promtail "$PROMTAIL_CHART_VERSION" promtail.yaml 3m
+        helm_install INSTALL_ALLOY alloy grafana/alloy "$ALLOY_CHART_VERSION" alloy.yaml 3m
     fi
 }
 

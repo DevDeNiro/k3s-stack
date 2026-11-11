@@ -31,7 +31,7 @@ connues, et la procédure pour faire passer le VPS actuel sur la nouvelle platef
 
 - **Pod Security Admission** par namespace : `baseline` pour l'infrastructure ;
   `privileged` seulement pour `nginx-gateway` (hostPorts 80/443) et `monitoring`
-  (node-exporter, Promtail), avec audit et avertissements au niveau `baseline`. Côté
+  (node-exporter, Alloy), avec audit et avertissements au niveau `baseline`. Côté
   applications : `restricted` en alpha comme en prod (`config/onboarding/`) : l'alpha suit
   `develop` automatiquement et partage le nœud avec la prod (`baseline` laisserait la
   capacité NET_RAW aux conteneurs root).
@@ -120,7 +120,7 @@ OAuth, `id_token_hint` de déconnexion.
 | Niveau | Mesure | Fichier |
 |--------|--------|---------|
 | Passerelle | journal d'accès JSON (NginxProxy de NGF) : chemin `$uri` sans query string, sans Referer (il porte l'URL complète de la page précédente) | `values/nginx-gateway-fabric.yaml` |
-| Loki | étapes `replace` de Promtail : le jeton des chemins `/stop/<jeton>` et les valeurs `code`, `state`, `session_state`, `id_token_hint` des query strings sont remplacés par `<redacted>`, quel que soit le pod | `values/promtail.yaml` |
+| Loki | étapes `replace` d'Alloy : le jeton des chemins `/stop/<jeton>` et les valeurs `code`, `state`, `session_state`, `id_token_hint` des query strings sont remplacés par `<redacted>`, quel que soit le pod | `values/alloy.yaml` |
 
 Ce qui reste : les fichiers du nœud (`/var/log/pods/`, root uniquement, lus par
 `kubectl logs`) gardent les lignes brutes jusqu'à leur rotation par le kubelet (10 Mio par
@@ -165,7 +165,8 @@ complète côté application. Loki conserve 7 jours de journaux déjà masqués.
   correspondent à des clients distincts, utiliser un compte machine par organisation.
 - Les applications sortent librement vers Internet et vers les services de la plateforme
   autorisés : le cloisonnement repose sur les politiques d'entrée.
-- Promtail est en fin de vie : migration vers Grafana Alloy à prévoir.
+- Promtail est en fin de vie : les installations existantes doivent suivre la procédure
+  de migration vers Alloy dans [`observability.md`](observability.md#notes-for-vps-upgrades).
 - Les mises à jour en place d'une installation existante ne sont pas le chemin nominal
   (par exemple, la taille du PVC d'Alertmanager est immuable) : réinstaller.
 
