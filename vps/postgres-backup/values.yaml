@@ -11,17 +11,17 @@
 # Backup Schedules
 # =============================================================================
 schedules:
-    # Daily backup at 03:00 UTC (retained 7 days)
+    # Daily backup at 03:00 in the controller's timezone (retained 7 days)
     daily:
         enabled: true
         cron: "0 3 * * *"
         retentionDays: 7
-    # Weekly backup on Sunday at 04:00 UTC (retained 30 days)
+    # Weekly backup on Sunday at 04:00 in the controller's timezone (retained 30 days)
     weekly:
         enabled: true
         cron: "0 4 * * 0"
         retentionDays: 30
-    # Monthly backup on 1st at 05:00 UTC (retained 365 days)
+    # Monthly backup on 1st at 05:00 in the controller's timezone (retained 365 days)
     monthly:
         enabled: true
         cron: "0 5 1 * *"
@@ -85,8 +85,8 @@ resources:
 # Off-site Copy (restic), optional
 # =============================================================================
 # The CronJob <release>-offsite copies the dump volume to an encrypted restic
-# repository on an S3-compatible object storage once the dumps of the day are
-# done, then applies the retention below (restic forget --prune). The CronJob
+# repository on an S3-compatible object storage, then applies the retention below
+# (restic forget --prune). It does not wait for dump jobs to finish. The CronJob
 # <release>-offsite-check verifies the repository every week. A failed job
 # raises the KubeJobFailed alert.
 # vps/scripts/apply-backups.sh enables it when OFFSITE_BACKUP_REPOSITORY is set
@@ -104,14 +104,14 @@ offsite:
     # snapshots of every job pod
     snapshotHost: postgres-backup
     backup:
-        # After the daily (03:00), weekly (Sunday 04:00) and monthly (1st, 05:00) dumps
+        # Scheduled after the dump jobs, without waiting for their completion
         cron: "30 5 * * *"
         # restic forget --prune: snapshots kept
         keepDaily: 7
         keepWeekly: 4
         keepMonthly: 12
     check:
-        # Sunday 06:30 UTC
+        # Sunday 06:30 in the controller's timezone
         cron: "30 6 * * 0"
         # Share of the data downloaded and verified at each check; "": structure only
         readDataSubset: "10%"

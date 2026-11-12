@@ -2,6 +2,9 @@
 
 Commandes essentielles pour administrer le cluster K3s.
 
+Pour installer le cluster et onboarder une application en huit étapes :
+[`installation-onboarding.md`](installation-onboarding.md).
+
 ## Pods & Déploiements
 
 ```bash
@@ -52,7 +55,7 @@ kubectl port-forward -n <namespace> svc/<service> <local-port>:<service-port>
 # Exemples
 kubectl port-forward -n monitoring svc/grafana 3000:80
 kubectl port-forward -n security svc/keycloak 8080:80
-kubectl port-forward -n argocd svc/argocd-server 8443:443
+kubectl port-forward -n argocd svc/argocd-server 8080:80
 ```
 
 ## Gateway API
@@ -97,6 +100,9 @@ kubectl describe deployment <name> -n <namespace>
 
 ## Secrets
 
+Pour créer les secrets applicatifs sans les exposer en argument, voir
+[`installation-onboarding.md`](installation-onboarding.md#7-configurer-lidentité-et-les-secrets-de-lapplication).
+
 ```bash
 # Lister les secrets
 kubectl get secrets -n <namespace>
@@ -106,11 +112,6 @@ kubectl get secret <name> -n <namespace> -o yaml
 
 # Décoder un secret
 kubectl get secret <name> -n <namespace> -o jsonpath='{.data.<key>}' | base64 -d
-
-# Créer un secret
-kubectl create secret generic <name> -n <namespace> \
-    --from-literal=key1=value1 \
-    --from-literal=key2=value2
 ```
 
 ## Loki / LogQL (centralized logs)
@@ -262,9 +263,6 @@ kubectl version
 
 # Nodes
 kubectl get nodes -o wide
-
-# Kubeconfig
-cat /etc/rancher/k3s/k3s.yaml
 ```
 
 ## Helm

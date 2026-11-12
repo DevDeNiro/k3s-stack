@@ -1,9 +1,12 @@
 # Guide de déploiement VPS
 
+> Archive : guide remplacé par [`installation-onboarding.md`](../installation-onboarding.md).
+> Certaines commandes et informations ne sont plus à jour.
+
 Procédure guidée d'une première installation sur un VPS neuf, jusqu'au déploiement d'une
 application (`my-app` dans les exemples). La référence des scripts et de leurs paramètres est
-[`../README.md`](../README.md) ; la migration d'un VPS déjà installé est décrite dans
-[`security-hardening.md`](security-hardening.md).
+[`../README.md`](../../README.md) ; le modèle de sécurité et ses limites sont décrits dans
+[`security-hardening.md`](../security-hardening.md).
 
 ## Architecture
 
@@ -25,7 +28,7 @@ et ses hostnames. Un cache (Redis) se déploie dans le chart de l'application.
 ## Étape 1 : préparer le serveur
 
 1. VPS Ubuntu 24.04 (ou 22.04, Debian 12), 4 Go de RAM minimum, accès SSH par clé
-   ([`workstation-setup.md`](workstation-setup.md)).
+   ([`workstation-setup.md`](../workstation-setup.md)).
 2. DNS : un enregistrement A par hostname public (`auth.example.com`, `app.example.com`,
    `alpha.example.com`…) vers l'IP du VPS.
 3. Cloner le dépôt et créer la configuration :
@@ -123,7 +126,8 @@ script crée :
 - le rôle et la base PostgreSQL, fermée aux autres rôles ;
 - le Secret `my-app-db`, dont les URLs exigent TLS ;
 - le Secret de lecture des images (`ghcr-secret`) et le Secret d'accès au dépôt ;
-- en dernier, l'AppProject `my-app` : Argo CD déploie l'application dans les 3 minutes.
+- en dernier, l'AppProject `my-app` : Argo CD découvre l'application dans les 3 minutes ;
+  alpha se synchronise automatiquement et la production manuellement.
 
 Une application sans base de données (client statique servi par nginx) s'onboarde avec
 `--skip-database`. Les mots de passe sont conservés dans `/root/.k3s-secrets/my-app.env`. Les
@@ -141,12 +145,13 @@ mkdir -p ~/.k3s-secrets && scp <user>@<vps>:sealed-secrets-pub.pem ~/.k3s-secret
 # Une valeur chiffrée par clé de Secret, saisie sans écho (jamais en argument)
 read -r -s -p "Valeur : " VALUE; echo
 printf '%s' "$VALUE" | kubeseal --raw --cert ~/.k3s-secrets/sealed-secrets-pub.pem \
-    --namespace my-app-alpha --name my-app-db --from-file=/dev/stdin
+    --namespace my-app-alpha --name my-app-secrets --from-file=/dev/stdin
 unset VALUE
 ```
 
-Le mot de passe de base à sceller est celui de `export-secrets.sh show my-app` ; un
-SealedSecret n'est déchiffrable que dans le namespace et sous le nom donnés au scellement
+Le Secret `my-app-db` est déjà créé par `onboard-app.sh` : conserver son mot de passe
+hors du serveur sans le publier dans Git. Sceller ici les autres secrets requis par
+l'application. Un SealedSecret n'est déchiffrable que dans le namespace et sous le nom donnés au scellement
 (avec l'annotation `sealedsecrets.bitnami.com/namespace-wide`, sceller avec
 `--scope namespace-wide` et sans `--name`).
 Copier les valeurs chiffrées dans `values-alpha.yaml` et `values-prod.yaml`, puis pousser.
@@ -184,7 +189,7 @@ kubectl logs -n storage -l app.kubernetes.io/component=offsite -f
 
 Ranger le mot de passe restic dans un gestionnaire de mots de passe : sans lui, les
 sauvegardes hors site sont indéchiffrables. Restauration et exercice :
-[`postgres-backup.md`](postgres-backup.md).
+[`postgres-backup.md`](../postgres-backup.md).
 
 ## Étape 11 (optionnel) : thèmes et providers Keycloak
 
@@ -221,7 +226,7 @@ onboardé contenant `helm/<repo>/`, l'Application `<repo>-prod` (branche `main`)
 `helm/`. Un dépôt non onboardé n'a pas d'AppProject, donc pas d'Application. Le chart ne
 doit contenir aucune ressource de niveau cluster (Namespace, ClusterRole, CRD...) ni
 `ResourceQuota`, `LimitRange`, `Endpoints` ou `EndpointSlice`.
-les annotations des Applications. Les noms de dépôt doivent être en minuscules et uniques
+Les noms de dépôt doivent être en minuscules et uniques
 entre les organisations.
 
 Structure attendue d'un dépôt :
@@ -247,7 +252,7 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controlle
 | Problème | Cause |
 |----------|-------|
 | `generated 0 applications` | pas de dossier `helm/`, token sans accès à l'organisation, ou (alpha) pas de branche `develop` |
-| `application references project ... which does not exist` | application non onboardée : `onboard-app.sh <app>` |
+| `application references project ... which does not exist` | application non onboardée : `onboard-app.sh <app>` ; si le projet existe déjà, rafraîchir l'ApplicationSet concerné (`kubectl annotate applicationset autodiscover-prod -n argocd argocd.argoproj.io/application-set-refresh=true --overwrite` pour la production) |
 | `... is not permitted in project` | ressource de niveau cluster, de type refusé ou d'une autre namespace dans le chart |
 | `secret scm-token not found` | `export-secrets.sh set-scm-credentials` non exécuté |
 | `ImagePullBackOff` | `ghcr-secret` absent : `set-registry-credentials`, puis onboarder |
@@ -269,7 +274,7 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-applicationset-controlle
 
 ## Documentation complémentaire
 
-- [Architecture et concepts](architecture.md)
-- [Administration PostgreSQL](database-admin.md) et [sauvegardes](postgres-backup.md)
-- [Observabilité](observability.md)
-- [Aide-mémoire des commandes](commands-cheatsheet.md)
+- [Architecture et concepts](../architecture.md)
+- [Administration PostgreSQL](../database-admin.md) et [sauvegardes](../postgres-backup.md)
+- [Observabilité](../observability.md)
+- [Aide-mémoire des commandes](../commands-cheatsheet.md)

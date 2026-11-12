@@ -8,14 +8,16 @@ serveur (restic vers un stockage objet compatible S3) et vérifient la copie cha
 
 ## Fonctionnement
 
-| CronJob | Planification (UTC) | Rétention |
+| CronJob | Planification (fuseau du contrôleur K3s) | Rétention |
 |---------|---------------------|-----------|
 | `postgres-backup-daily` | tous les jours à 03:00 | 7 jours |
 | `postgres-backup-weekly` | le dimanche à 04:00 | 30 jours |
 | `postgres-backup-monthly` | le 1er du mois à 05:00 | 365 jours |
-| `postgres-backup-offsite` (optionnel) | tous les jours à 05:30, après les dumps | 7 instantanés quotidiens, 4 hebdomadaires, 12 mensuels |
+| `postgres-backup-offsite` (optionnel) | tous les jours à 05:30 | 7 instantanés quotidiens, 4 hebdomadaires, 12 mensuels |
 | `postgres-backup-offsite-check` (optionnel) | le dimanche à 06:30 | - |
 
+- La copie hors site est planifiée après les dumps, mais n'attend pas leur fin : vérifier
+  que chaque dump attendu est terminé avant de lancer une copie manuelle.
 - **Bases** : toutes les bases `*-prod` plus `keycloak` (découverte automatique,
   `databases: auto`). Les bases `*-alpha` ne sont pas sauvegardées.
 - **Format** : `pg_dump -Fc --no-owner --no-acl`, compressé en gzip (`<base>_<date>.dump.gz`).
@@ -27,7 +29,9 @@ serveur (restic vers un stockage objet compatible S3) et vérifient la copie cha
   `app.kubernetes.io/name: postgres-backup`). Les jobs suivent le profil Pod Security
   `restricted`.
 - **Échecs** : un job en échec déclenche l'alerte `KubeJobFailed` (Alertmanager), copie hors
-  site comprise.
+  site comprise. Cependant, le job de dump peut réussir même si une base individuelle a
+  échoué : vérifier ses journaux pour chaque base attendue et les avertissements `Failed to
+  backup`. Une copie restic réussie ne prouve pas que tous les dumps sont présents.
 
 ## Emplacement des dumps
 
@@ -62,11 +66,11 @@ données (`restic check --read-data-subset=10%`). Les jobs tournent en utilisate
 seule et cache restic dans un `emptyDir`. Image : `docker.io/restic/restic`, version
 `RESTIC_VERSION` de `config/versions.env`.
 
-Le dépôt ne contient que les dumps PostgreSQL. **La sauvegarde chiffrée de la clé Sealed
-Secrets (`/var/backups/k3s-stack/sealed-secrets/`, `export-secrets.sh backup-sealing-key`)
-se copie hors du serveur à la main**, de même que les valeurs en clair des clés
-applicatives qui ne vivent que dans des SealedSecrets : sans elles, une restauration sur un
-nouveau serveur ne peut plus déchiffrer les secrets des applications.
+Le dépôt ne contient que les dumps PostgreSQL. **Copier à la main hors du serveur la
+sauvegarde chiffrée de la clé Sealed Secrets** (`/var/backups/k3s-stack/sealed-secrets/`,
+`export-secrets.sh backup-sealing-key`) : elle permet de déchiffrer les SealedSecrets
+existants après restauration. Sauvegarder aussi les clés applicatives pour pouvoir les
+sceller à nouveau si nécessaire.
 
 ### Configurer
 
@@ -102,11 +106,15 @@ site ; le dépôt et ses instantanés restent dans le bucket.
 ### Lancer une copie maintenant
 
 ```bash
-kubectl create job --from=cronjob/postgres-backup-offsite offsite-manual-$(date +%s) -n storage
-kubectl logs -n storage -l app.kubernetes.io/component=offsite -f
+JOB="offsite-manual-$(date +%s)"
+kubectl create job --from=cronjob/postgres-backup-offsite "$JOB" -n storage
+kubectl wait --for=condition=complete "job/$JOB" -n storage --timeout=15m
+kubectl logs -n storage "job/$JOB"
 # vérification du dépôt
-kubectl create job --from=cronjob/postgres-backup-offsite-check offsite-check-$(date +%s) -n storage
-kubectl logs -n storage -l app.kubernetes.io/component=offsite-check -f
+JOB="offsite-check-$(date +%s)"
+kubectl create job --from=cronjob/postgres-backup-offsite-check "$JOB" -n storage
+kubectl wait --for=condition=complete "job/$JOB" -n storage --timeout=15m
+kubectl logs -n storage "job/$JOB"
 ```
 
 Le journal se termine par la liste des instantanés et `[INFO] Off-site copy completed`.
@@ -129,8 +137,10 @@ Les dumps contiennent les données en clair : les conserver chiffrés.
 kubectl get cronjobs,jobs -n storage
 
 # Sauvegarde immédiate et suivi
-kubectl create job --from=cronjob/postgres-backup-daily manual-backup-$(date +%s) -n storage
-kubectl logs -n storage -l app.kubernetes.io/component=backup-daily --tail=50
+JOB="manual-backup-$(date +%s)"
+kubectl create job --from=cronjob/postgres-backup-daily "$JOB" -n storage
+kubectl wait --for=condition=complete "job/$JOB" -n storage --timeout=15m
+kubectl logs -n storage "job/$JOB"
 ```
 
 ## Restaurer une base
@@ -144,17 +154,17 @@ DB=my-app-prod
 DUMP=/var/lib/rancher/k3s/storage/<volume>/daily/${DB}_<date>.dump.gz
 PGPW=$(kubectl get secret postgresql-secret -n storage -o jsonpath='{.data.postgres-password}' | base64 -d)
 
-{ printf '%s\n' "$PGPW"; gunzip -c "$DUMP"; } \
+gunzip -t "$DUMP" && { printf '%s\n' "$PGPW"; gunzip -c "$DUMP"; } \
     | kubectl exec -i -n storage postgresql-0 -c postgresql -- sh -c \
         'IFS= read -r PGPASSWORD; export PGPASSWORD
-         pg_restore -h 127.0.0.1 -U postgres -d "$1" --no-owner --role="$1" --clean --if-exists' restore "$DB"
+         pg_restore -h 127.0.0.1 -U postgres -d "$1" --no-owner --role="$1" --clean --if-exists --exit-on-error' restore "$DB"
 ```
 
 - La base et le rôle doivent exister (`onboard-app.sh`, ou `install.sh` pour `keycloak`).
 - Arrêter l'application pendant la restauration
   (`kubectl scale deploy --all -n <namespace> --replicas=0`). Si l'auto-sync d'Argo CD
-  est actif, il la redémarre à la synchronisation suivante : suspendre la synchronisation
-  dans l'interface d'Argo CD le temps de l'opération. Pour Keycloak :
+  est actif, prévoir une suspension compatible avec l'ApplicationSet et vérifier que les
+  pods restent arrêtés : modifier seulement l'Application générée peut être annulé. Pour Keycloak :
   `kubectl scale statefulset keycloak -n security --replicas=0`, puis `--replicas=1`.
 - Un dump d'une version plus ancienne de PostgreSQL se restaure sans conversion.
 
@@ -185,8 +195,9 @@ Un instantané plus ancien se restaure avec son identifiant à la place de `late
 `/var/backups/k3s-stack/restore/backups/daily/` : restaurer ensuite la base avec
 `pg_restore` comme ci-dessus (`DUMP=/var/backups/k3s-stack/restore/backups/daily/<base>_<date>.dump.gz`),
 après avoir recréé le rôle et la base (`install.sh`, `onboard-app.sh` avec les mots de passe
-d'origine). Pour Keycloak, suivre la procédure de [`security-hardening.md`](security-hardening.md)
-(base recréée vide, Keycloak arrêté). Puis effacer les traces :
+d'origine). Pour Keycloak, l'arrêter et restaurer dans une base `keycloak` vide appartenant
+au rôle `keycloak`, puis le redémarrer. Recréer la base efface ses données : préparer et
+tester la procédure sur une copie isolée avant toute opération réelle. Puis effacer les traces :
 
 ```bash
 rm -rf /var/backups/k3s-stack/restore      # dumps en clair
@@ -195,10 +206,14 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY RESTIC_PASSWORD
 
 ## Exercice de restauration
 
-Une sauvegarde n'est fiable qu'une fois restaurée. Faire l'exercice avant la mise en
-production d'une application, puis chaque trimestre et après toute modification des
-sauvegardes. Il restaure le dernier dump hors site d'une base dans une base temporaire,
-sans toucher la base de production. Sur le serveur, en root (environ 15 minutes) :
+Une sauvegarde n'est fiable qu'une fois restaurée. Avant la mise en production d'une
+application, tester la restauration sur un cluster isolé, puis la renouveler chaque
+trimestre et après toute modification des sauvegardes.
+
+La procédure ci-dessous restaure le dernier dump hors site dans une base temporaire sur
+le serveur de production. Elle ne modifie pas la base de production, mais partage ses
+ressources et ne remplace pas un exercice sur un cluster isolé. Sur le serveur, en root
+(environ 15 minutes) :
 
 1. Copie hors site fraîche : lancer `postgres-backup-offsite` (voir « Lancer une copie
    maintenant ») et attendre `[INFO] Off-site copy completed`.
@@ -223,7 +238,7 @@ sans toucher la base de production. Sur le serveur, en root (environ 15 minutes)
    { printf '%s\n' "$PGPW"; gunzip -c "$DUMP"; } \
        | kubectl exec -i -n storage postgresql-0 -c postgresql -- sh -c \
            'IFS= read -r PGPASSWORD; export PGPASSWORD
-            pg_restore -h 127.0.0.1 -U postgres -d restore_drill --no-owner --no-acl'
+            pg_restore -h 127.0.0.1 -U postgres -d restore_drill --no-owner --no-acl --exit-on-error'
    for db in restore_drill "$DB"; do
        pg psql -h 127.0.0.1 -U postgres -d "$db" -X -A -t -c \
            "SELECT current_database(), count(*) FROM pg_stat_user_tables"

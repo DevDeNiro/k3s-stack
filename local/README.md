@@ -1,10 +1,11 @@
 # Local mirror of the VPS stack (k3d)
 
 A local Kubernetes cluster built with [k3d](https://k3d.io/) that mirrors the VPS
-platform: same K3s release and flags, same Gateway API controller, same PostgreSQL
+platform: same K3s release, same Gateway API controller, same PostgreSQL
 configuration (TLS, SCRAM), same Keycloak template, routes and rate limit, same GitOps and
 secret controllers. Versions come from [`../vps/config/versions.env`](../vps/config/versions.env),
-shared with the VPS.
+shared with the VPS. They are installation defaults, not proof of the versions currently
+running on an existing cluster.
 
 ## Architecture
 

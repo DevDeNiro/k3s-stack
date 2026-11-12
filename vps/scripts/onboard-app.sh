@@ -200,7 +200,8 @@ create_databases() {
     for env in "${TARGET_ENVS[@]}"; do
         ensure_database "$env"
     done
-    echo "  Passwords saved in $APP_SECRETS_FILE: seal them in the application repository for GitOps."
+    echo "  Passwords saved in $APP_SECRETS_FILE; the ${APP_NAME}-db Secrets are already in the namespaces."
+    echo "  Back up the passwords securely outside the server; do not commit them to Git."
 }
 
 # create_pull_secrets: image pull Secret of each namespace, copied from the one of
@@ -240,8 +241,8 @@ create_repository_secret() {
 }
 
 # create_project: Argo CD AppProject of the application, applied last: the
-# ApplicationSets deploy the application from then on (within 3 minutes), with
-# everything it needs already in place
+# ApplicationSets discover the application from then on (within 3 minutes), with
+# everything it needs already in place; production still requires a manual sync
 create_project() {
     step "Argo CD project ${APP_NAME}"
     if ! kubectl get crd appprojects.argoproj.io >/dev/null 2>&1; then
@@ -260,8 +261,8 @@ print_summary() {
     echo "    namespace allowed to route it (<hostname>=${APP_NAME}-prod, <hostname>=${APP_NAME}-alpha), then:"
     echo "      sudo ./vps/scripts/setup-gateway-api.sh"
     echo "  - attach its HTTPRoutes to the Gateway infrastructure-gateway (namespace nginx-gateway)"
-    echo "  - Argo CD deploys helm/${APP_NAME} from ${ORGANIZATION}/${APP_NAME} within 3 minutes:"
-    echo "    main -> prod, develop -> alpha when the repository has a develop branch"
+    echo "  - Argo CD discovers helm/${APP_NAME} from ${ORGANIZATION}/${APP_NAME} within 3 minutes:"
+    echo "    main -> prod (manual sync), develop -> alpha (automatic sync) when the branch exists"
     echo "    (image $(image_base "$ORGANIZATION")/${APP_NAME}, AppProject ${APP_NAME})"
 }
 

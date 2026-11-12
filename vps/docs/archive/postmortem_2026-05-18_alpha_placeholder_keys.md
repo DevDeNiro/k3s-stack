@@ -1,5 +1,7 @@
 # Postmortem - placeholder VAPID keys in an alpha environment (2026-05-18)
 
+> Historical incident record. Its infrastructure references and open action items reflect the state at the time, not necessarily the current platform.
+
 ## TL;DR
 `my-app-alpha` had been in **CrashLoopBackOff for 48 consecutive days** (since 2026-03-31), totalling **25 833 container restarts** across two ReplicaSets, without anyone noticing. Root cause: the Helm values file shipped a literal placeholder string `<GENERATE_NEW_KEY_PAIR_FOR_ALPHA>` as the value of `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. Spring Boot's WebPush configuration tried to Base64-decode the placeholder at startup, failed with `IllegalArgumentException: Illegal base64 character 3c`, and the entire application context refused to start. ArgoCD's `selfHeal: true` retried **13 762 times** with no chance of converging because the bug was structural.
 
@@ -107,7 +109,7 @@ my-app-alpha-646cbd766b-kx9gp  0/1  CrashLoopBackOff  10710 (3m45s ago)  48d
 - **Architecture decision**: ArgoCD `selfHeal: true` is convenient for transient issues but can hide structural failures indefinitely. A finite retry budget would surface "this can never converge" earlier.
 
 ## References
-- Runbook: [`runbook_pod_crashes.md`](runbook_pod_crashes.md)
-- Observability stack overview: [`observability.md`](observability.md)
+- Runbook: [`runbook_pod_crashes.md`](../runbook_pod_crashes.md)
+- Observability stack overview: [`observability.md`](../observability.md)
 - Previous related postmortem (ArgoCD sync stagnation, same env): [`postmortem_2026-02-14_argocd_sync.md`](postmortem_2026-02-14_argocd_sync.md)
 - Local forensic artifact bundle (operator-side): `<operator-home>/vps-investigation-artifacts/`

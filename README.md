@@ -20,8 +20,9 @@ Kubernetes platform for a **single VPS**, with a **local k3d mirror** for develo
   masked before Loki
 
 Configuration lives in files (`vps/config`, `vps/templates`, `vps/values`), the scripts hold
-the logic, versions are pinned in [`vps/config/versions.env`](vps/config/versions.env), and a
-full reinstallation is the nominal way to apply a major change.
+the logic, and versions are pinned in [`vps/config/versions.env`](vps/config/versions.env).
+New installations use the pinned defaults. An existing cluster requires a tested,
+component-specific upgrade or migration plan; reinstalling deletes local data and backups.
 
 ## Deployment modes
 
@@ -30,20 +31,14 @@ full reinstallation is the nominal way to apply a major change.
 | **VPS** | production on a 4-6 GB server | [`vps/README.md`](vps/README.md) (every script and parameter) |
 | **Local** | development with k3d + Docker | [`local/README.md`](local/README.md) |
 
-Security model and migration of an existing VPS:
+Security model and known limitations:
 [`vps/docs/security-hardening.md`](vps/docs/security-hardening.md).
 
 ## Quick start
 
 ### VPS
 
-```bash
-git clone https://github.com/DevDeNiro/k3s-stack.git && cd k3s-stack
-cp vps/config.env.example vps/config.env && nano vps/config.env
-sudo ./vps/install.sh
-```
-
-Then follow [`vps/docs/vps-deployment.md`](vps/docs/vps-deployment.md).
+Follow [`vps/docs/installation-onboarding.md`](vps/docs/installation-onboarding.md).
 
 ### Local
 

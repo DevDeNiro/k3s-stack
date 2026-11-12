@@ -5,23 +5,19 @@ Let's Encrypt certificates, PostgreSQL, Keycloak, Argo CD GitOps, Sealed Secrets
 metrics, logs and alerts, with the applications isolated from each other. Everything is
 installed and operated by the scripts of this directory.
 
-- Guided first installation: [`docs/vps-deployment.md`](docs/vps-deployment.md)
-- Security model and migration of an existing VPS: [`docs/security-hardening.md`](docs/security-hardening.md)
+- Essential installation and application onboarding: [`docs/installation-onboarding.md`](docs/installation-onboarding.md)
+- GitOps deployment flow: [`docs/deployment-flow.md`](docs/deployment-flow.md)
+- Security model and known limitations: [`docs/security-hardening.md`](docs/security-hardening.md)
 - Workstation access (SSH tunnel, kubectl, k9s): [`docs/workstation-setup.md`](docs/workstation-setup.md)
-- Isolating the applications of a running VPS (AppProjects, hostname owners, default
-  NetworkPolicies, two tokens, no shared
-  Redis): [Isolating the applications on an existing VPS](#isolating-the-applications-on-an-existing-vps)
-- Upgrading a running VPS to the multi-organization discovery, Keycloak extensions,
-  gateway rate limit and off-site
-  backups: [Applying the multi-organization change to an existing VPS](#applying-the-multi-organization-change-to-an-existing-vps)
+- Historical transition procedures: [`docs/archive/migrations-en-place-historiques.md`](docs/archive/migrations-en-place-historiques.md)
 
 ## Principles
 
 - **Configuration lives in files, scripts hold the logic.** No inline YAML in the
   scripts: they render templates or apply static files.
-- **Reinstallation is the nominal path.** A major change (K3s flags, versions,
-  hostnames of a fresh server) is applied with `uninstall.sh --all` then `install.sh`.
-  Scripts are idempotent, but upgrading a live installation in place is not their goal.
+- **A running cluster needs a tested migration plan.** The installer targets a fresh
+  server. Reinstallation deletes the databases and local backups; never use it for a
+  routine change without verified backups and a tested restoration.
 - **Secrets never appear in command arguments** (process list, Kubernetes audit log):
   values travel through stdin or file descriptors, generated credentials stay in
   `/root/.k3s-secrets` (mode 0700/0600).
@@ -51,6 +47,8 @@ installed and operated by the scripts of this directory.
 
 ## Components
 
+The versions below are pinned installation defaults; an existing cluster may run different versions.
+
 | Component                                                                       | Version                         | Namespace       | Exposure                                                                            |
 |---------------------------------------------------------------------------------|---------------------------------|-----------------|-------------------------------------------------------------------------------------|
 | K3s (SQLite datastore, secrets encrypted at rest)                               | v1.37.2+k3s1                    | -               | API closed by the firewall, SSH tunnel                                              |
@@ -78,22 +76,7 @@ Steady-state memory: ~3.5 GB. 4 GB of RAM is the minimum, 6 GB is comfortable.
 
 ## Quick start
 
-```bash
-git clone https://github.com/DevDeNiro/k3s-stack.git && cd k3s-stack
-cp vps/config.env.example vps/config.env && nano vps/config.env
-./vps/scripts/apply-config.sh --check
-
-sudo ./vps/install.sh
-sudo ./vps/scripts/export-secrets.sh backup-sealing-key      # then copy the .enc file off the server
-sudo ./vps/scripts/setup-gateway-api.sh --staging            # check, then again without --staging
-sudo ./vps/scripts/export-secrets.sh set-registry-credentials   # read-only image pull token
-sudo ./vps/scripts/export-secrets.sh set-scm-credentials github # repository token (argocd only)
-sudo ./vps/scripts/onboard-app.sh <app> [--organization <org>]
-sudo ./vps/scripts/setup-secrets.sh set-offsite-backup       # with OFFSITE_BACKUP_REPOSITORY
-
-# On the workstation
-./vps/scripts/setup-remote.sh <vps-host> --user <ssh-user>
-```
+Follow [`docs/installation-onboarding.md`](docs/installation-onboarding.md).
 
 ## Configuration
 
@@ -101,7 +84,7 @@ sudo ./vps/scripts/setup-secrets.sh set-offsite-backup       # with OFFSITE_BACK
 
 | Variable                                                | Example                                                                 | Used by                                                                                                                         |
 |---------------------------------------------------------|-------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `SCM_PROVIDER`                                          | `github` (or `gitlab`)                                                  | Argo CD repository discovery, `onboard-app.sh`                                                                                  |
+| `SCM_PROVIDER`                                          | `github`                                                                | GitHub repository discovery and `onboard-app.sh`; the current ApplicationSet generators do not support GitLab                   |
 | `SCM_ORGANIZATIONS`                                     | `my-org other-org`                                                      | one ApplicationSet generator per organization, repository credentials, `onboard-app.sh --organization`                          |
 | `SCM_ORGANIZATION`                                      | `my-org`                                                                | single organization of older files, used when `SCM_ORGANIZATIONS` is empty                                                      |
 | `REGISTRY_HOST`                                         | `ghcr.io` (default)                                                     | images `<REGISTRY_HOST>/<organization>/<repository>` (Applications, Image Updater), image pull Secrets                          |
@@ -217,7 +200,8 @@ Applications per onboarded repository holding `helm/<repository>/`: `<repository
 (branch `main`, image `<image path>/<repository>`, tags `main-<sha>`, manual sync) for
 every repository whose default branch holds `helm/`, and `<repository>-alpha` (branch
 `develop`, tags `develop-<sha>`, automated sync) only when the repository has a `develop`
-branch holding `helm/`. A chart must not hold cluster-scoped resources (Namespace,
+branch holding `helm/`. Each SCM generator polls every 180 seconds (more frequent GitHub API
+requests than the Argo CD default of 30 minutes). A chart must not hold cluster-scoped resources (Namespace,
 ClusterRole, CRD...) nor `ResourceQuota`, `LimitRange`, `Endpoints` or `EndpointSlice`:
 its AppProject refuses them.
 
@@ -392,8 +376,9 @@ and Prometheus open connections to its pods), the PostgreSQL role and database
 `database`, `username`, `password`, `url` and `r2dbc-url` with TLS required) and the image
 pull Secret `ghcr-secret`, copied from `argocd/ghcr-registry-secret` (after
 `set-registry-credentials`). Then the Argo CD repository Secret of `<organization>/<app>`
-(after `set-scm-credentials`) and, last, the AppProject `<app>`: Argo CD deploys the
-application within 3 minutes.
+(after `set-scm-credentials`) and, last, the AppProject `<app>`. The generators poll every
+3 minutes; actual discovery can take longer. Alpha syncs automatically; production
+requires a manual sync.
 
 | Option               | Effect                                                                              |
 |----------------------|-------------------------------------------------------------------------------------|
@@ -444,7 +429,7 @@ access through a temporary SSH tunnel.
 | `--port SSH_PORT`   | `22`      | SSH port                                                                                           |
 | `--local-port PORT` | `16443`   | local end of the tunnel                                                                            |
 | `--context NAME`    | `k3s-vps` | kubeconfig context, cluster and user name                                                          |
-| `--direct`          | -         | `https://<vps-host>:6443` without tunnel (requires `harden-host.sh --allow-api-from <your-ip>/32`) |
+| `--direct`          | -         | `https://<vps-host>:6443` without tunnel; requires firewall access and an API certificate covering `<vps-host>` |
 
 Then: `ssh -fN -L 16443:127.0.0.1:6443 <user>@<vps-host>` and
 `export KUBECONFIG=~/.kube/config-k3s-vps`.
@@ -507,174 +492,3 @@ inside a container without network access.
 | Keycloak pod `Init:ImagePullBackOff`              | reference of `KEYCLOAK_EXTENSION_IMAGES`; private image: `kubectl get secret ghcr-secret -n security` (`set-registry-credentials`), then `apply-keycloak.sh`                                                                                                                                                                                              |
 | Keycloak answers `429`                            | `KEYCLOAK_RATE_LIMIT_RATE` and `KEYCLOAK_RATE_LIMIT_BURST` too low for the clients behind one address: raise them (or `off`), then `setup-gateway-api.sh`; `kubectl describe ratelimitpolicy keycloak -n security`                                                                                                                                        |
 | `KubeJobFailed` on `postgres-backup-offsite*`     | `kubectl logs -n storage -l app.kubernetes.io/component=offsite --tail=50` (exit code 12: wrong `RESTIC_PASSWORD`; unreachable repository: keys, region, bucket), [`docs/postgres-backup.md`](docs/postgres-backup.md)                                                                                                                                    |
-
-## Isolating the applications on an existing VPS
-
-An installation made before the application isolation gets it in place, without
-reinstallation. On the server, as root, from the updated clone (`git pull`,
-`export KUBECONFIG=/etc/rancher/k3s/k3s.yaml`), in this order:
-
-1. **Checks**: no application chart renders a resource refused by its future AppProject,
-   and the alpha namespaces accept the `restricted` level (no warning).
-
-   ```bash
-   helm template <app> <chart-dir> -f <chart-dir>/values-alpha.yaml \
-       | grep -E '^kind: (Namespace|Cluster[A-Za-z]*|CustomResourceDefinition|[A-Za-z]*WebhookConfiguration|PriorityClass|StorageClass|PersistentVolume|ResourceQuota|LimitRange|Endpoints|EndpointSlice)$'
-   kubectl label --dry-run=server --overwrite ns <app>-alpha pod-security.kubernetes.io/enforce=restricted
-   ```
-
-2. **Two tokens**: the read-only image pull token first, then the repository token, ideally
-   of a read-only machine account. Revoke the former token (`repo` and `read:packages`)
-   afterwards: it was readable in every application namespace.
-
-   ```bash
-   ./vps/scripts/export-secrets.sh set-registry-credentials
-   ./vps/scripts/export-secrets.sh set-scm-credentials github
-   ```
-
-3. **Applications**: onboard every existing application again, with its organization and
-   environments. Passwords are kept; it adds the AppProject, the default NetworkPolicy, the
-   `restricted` level of alpha, the closing of the databases to the other roles and the new
-   pull Secret. Then close the Keycloak database the same way.
-
-   ```bash
-   ./vps/scripts/onboard-app.sh <app> --organization <org> [--environment prod]
-   PGPW=$(kubectl get secret postgresql-secret -n storage -o jsonpath='{.data.postgres-password}' | base64 -d)
-   printf '%s\n' "$PGPW" | kubectl exec -i -n storage postgresql-0 -c postgresql -- sh -c \
-       'IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql -h 127.0.0.1 -U postgres -d postgres -X -c "REVOKE ALL ON DATABASE keycloak FROM PUBLIC"'
-   unset PGPW
-   ```
-
-4. **Argo CD**, only after step 3 (the Applications would otherwise land in the emptied
-   `default` project): one project per application, no namespace creation. The script lists
-   the Applications left without project.
-
-   ```bash
-   ./vps/scripts/apply-config.sh
-   kubectl get applications -n argocd -o custom-columns='APP:.metadata.name,PROJECT:.spec.project,SYNC:.status.sync.status'
-   ```
-
-5. **NetworkPolicies** of the namespaces `monitoring` and `argocd`:
-
-   ```bash
-   kubectl apply -f vps/manifests/network-policies.yaml
-   ```
-
-6. **Gateway**: write each entry of `GATEWAY_HOSTNAMES` as `<hostname>=<namespace>` (the
-   former format is refused with an explicit message), then apply. Every HTTPRoute must
-   stay accepted.
-
-   ```bash
-   nano vps/config.env && ./vps/scripts/apply-config.sh --check
-   ./vps/scripts/setup-gateway-api.sh
-   kubectl get httproutes -A -o custom-columns='NS:.metadata.namespace,ROUTE:.metadata.name,ACCEPTED:.status.parents[*].conditions[?(@.type=="Accepted")].status'
-   ```
-
-7. **Shared Redis**: once no application uses `redis.database.svc.cluster.local` any more (each one runs its cache in
-   its own chart), remove it with its namespace:
-
-   ```bash
-   kubectl delete namespace database
-   ```
-
-8. **Former CI/CD accounts** (`onboard-app.sh --with-cicd`, removed), if any:
-
-   ```bash
-   kubectl get serviceaccounts -A --field-selector metadata.name=deployer
-   kubectl delete -n <namespace> --ignore-not-found serviceaccount/deployer role/deployer-role \
-       rolebinding/deployer-binding secret/deployer-token
-   rm -rf /root/.k3s-secrets/kubeconfigs
-   ```
-
-9. **Keycloak**: no application may hold a credential of the realm `master` (an application
-   manages its realm with a service account of that realm). Then enable the brute force
-   detection of the realm `master` and an OTP for its administrator ([
-   `docs/security-hardening.md`](docs/security-hardening.md), known limits).
-
-## Applying the multi-organization change to an existing VPS
-
-An installation made before the multi-organization discovery, the Keycloak extensions, the
-gateway rate limit, the access log hygiene and the off-site backups gets them in place,
-without reinstallation. On the server, as root, from the updated clone:
-
-```bash
-cd <clone>/k3s-stack && git pull
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-```
-
-1. **`vps/config.env`**: add the new variables (`vps/config.env.example` documents them),
-   then validate the file.
-
-   ```bash
-   # SCM_ORGANIZATIONS="my-org other-org"   the current organization first (default of onboard-app.sh)
-   # REGISTRY_HOST="ghcr.io"                 remove REGISTRY_BASE when several organizations are listed
-   # KEYCLOAK_EXTENSION_IMAGES="ghcr.io/my-org/my-app-keycloak-theme:1.0.0"
-   # KEYCLOAK_RATE_LIMIT_RATE="10r/s"; KEYCLOAK_RATE_LIMIT_BURST="20"
-   # OFFSITE_BACKUP_REPOSITORY="s3:https://s3.fr-par.scw.cloud/my-bucket/k3s-stack"; OFFSITE_BACKUP_REGION="fr-par"
-   nano vps/config.env
-   ./vps/scripts/apply-config.sh --check
-   ```
-
-2. **Image pull and repository access** for every organization, before the new generators
-   and the Keycloak extension images need them (two tokens, see `export-secrets.sh`):
-
-   ```bash
-   ./vps/scripts/export-secrets.sh set-registry-credentials
-   ./vps/scripts/export-secrets.sh set-scm-credentials github
-   ```
-
-3. **Auto-discovery**: one generator per organization. Alpha Applications of repositories
-   without a `develop` branch are deleted (with their resources).
-
-   ```bash
-   ./vps/scripts/apply-config.sh
-   kubectl get applicationsets,applications -n argocd
-   ```
-
-4. **Logs**: migrate Promtail to Alloy and verify redaction using the
-   [observability migration procedure](docs/observability.md#notes-for-vps-upgrades),
-   then enable JSON access logs without query strings (NGINX reloads, no downtime):
-
-   ```bash
-   source vps/config/versions.env
-   helm upgrade nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version "$NGINX_GATEWAY_FABRIC_VERSION" \
-       -n nginx-gateway -f vps/values/nginx-gateway-fabric.yaml --wait
-   ```
-
-5. **Keycloak**: SMTP egress for the realm emails, then the template with the extension
-   images (restart: logins unavailable for 1 to 2 minutes).
-
-   ```bash
-   kubectl apply -f vps/manifests/network-policies.yaml
-   ./vps/scripts/apply-keycloak.sh
-   ```
-
-6. **Gateway**: Keycloak routes split (`keycloak`, `keycloak-resources`) and rate limit of
-   the OIDC endpoints.
-
-   ```bash
-   ./vps/scripts/setup-gateway-api.sh
-   kubectl get httproutes,ratelimitpolicies -n security
-   ```
-
-7. **Off-site backups**: credentials, then the backup chart, then a first copy (it creates
-   the repository).
-
-   ```bash
-   ./vps/scripts/setup-secrets.sh set-offsite-backup
-   ./vps/scripts/apply-backups.sh
-   kubectl create job --from=cronjob/postgres-backup-offsite offsite-first-$(date +%s) -n storage
-   kubectl logs -n storage -l app.kubernetes.io/component=offsite -f
-   ```
-
-8. **Applications**: onboard the repositories of the other organizations, and onboard the
-   existing applications again to refresh their repository Secret with the new token.
-
-   ```bash
-   ./vps/scripts/onboard-app.sh <app> --environment prod --organization <org>
-   ```
-
-Rollback: `KEYCLOAK_RATE_LIMIT_RATE="off"` then `setup-gateway-api.sh` removes the rate
-limit; an empty `KEYCLOAK_EXTENSION_IMAGES` then `apply-keycloak.sh` restores the plain
-Keycloak; an empty `OFFSITE_BACKUP_REPOSITORY` then `apply-backups.sh` removes the off-site
-CronJobs (the repository and its snapshots stay in the bucket).

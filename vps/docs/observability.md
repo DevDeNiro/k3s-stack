@@ -15,7 +15,7 @@ The k3s-stack ships a complete observability stack tuned for a 4-6 GB VPS:
 Total steady-state: ~1.0 GiB (leaves room for the application workloads).
 
 ## Why we have this stack
-On 2026-05-18 we discovered that the alpha environment of an application had been in CrashLoopBackOff for **48 days** (25 833 cumulative container restarts) without anyone noticing. See [`postmortem_2026-05-18_alpha_placeholder_keys.md`](postmortem_2026-05-18_alpha_placeholder_keys.md) for the full root-cause analysis.
+On 2026-05-18 we discovered that the alpha environment of an application had been in CrashLoopBackOff for **48 days** (25 833 cumulative container restarts) without anyone noticing. See the [archived postmortem](archive/postmortem_2026-05-18_alpha_placeholder_keys.md) for the full root-cause analysis.
 The observability stack is the corrective action: alerts, centralized logs, and dashboards specifically focused on **container restarts and pod health**.
 
 ## Access
@@ -179,6 +179,7 @@ the components individually, checking each rollout before proceeding:
 
 ```bash
 source vps/config/versions.env
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
 helm repo add grafana https://grafana.github.io/helm-charts --force-update
 helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update
 helm repo update

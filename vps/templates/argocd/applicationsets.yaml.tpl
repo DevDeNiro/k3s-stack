@@ -48,6 +48,8 @@ ${ALPHA_GENERATORS}
             annotations:
                 argocd-image-updater.argoproj.io/image-list: "app={{values.imageBase}}/{{repository}}"
                 argocd-image-updater.argoproj.io/app.update-strategy: newest-build
+                # Also select a tag before this Application has a live image
+                argocd-image-updater.argoproj.io/app.force-update: "true"
                 # Only deploy immutable builds created from the develop branch (CI tag develop-<full sha>)
                 argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^develop-[a-f0-9]{40}$"
                 argocd-image-updater.argoproj.io/write-back-method: argocd
@@ -108,6 +110,8 @@ ${PROD_GENERATORS}
             annotations:
                 argocd-image-updater.argoproj.io/image-list: "app={{values.imageBase}}/{{repository}}"
                 argocd-image-updater.argoproj.io/app.update-strategy: newest-build
+                # Also select a tag before this Application has a live image
+                argocd-image-updater.argoproj.io/app.force-update: "true"
                 # Only deploy immutable builds created from the main branch
                 argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^main-[a-f0-9]{40}$"
                 argocd-image-updater.argoproj.io/write-back-method: argocd

@@ -49,10 +49,11 @@ kubectl logs -n $NS $POD --previous --tail=200
 kubectl logs -n $NS $POD --previous --tail=2000 | grep -E "ERROR|Exception|Caused by"
 ```
 
-Once Loki is deployed (since 2026-05), logs survive even after the pod is deleted/pruned. In Grafana → Explore → Loki:
+In Grafana → Explore → Loki, replace the example namespace and pod with actual values.
+Logs remain available after pod deletion only while Loki retains them:
 
 ```logql
-{namespace="$NS", pod=~"$POD.*"} |= "ERROR"
+{namespace="my-app-alpha", pod="my-app-alpha-12345"} |= "ERROR"
 ```
 
 If the previous container logs are also empty, the app died before any log line was written — usually a JVM crash (see core dump) or a misconfigured CMD/ENTRYPOINT.
@@ -78,12 +79,13 @@ Compare the image digest currently running with the one referenced in Git (your 
 ```bash
 # Hot containers (live)
 kubectl top pod -n $NS
+```
 
-# Working-set bytes vs memory limit (Prometheus query)
-container_memory_working_set_bytes{namespace="$NS", pod="$POD"}
-  / kube_pod_container_resource_limits{namespace="$NS", pod="$POD", resource="memory"}
+In Grafana Explore, replace the example namespace and pod in this Prometheus query:
 
-# Past 24h trend in Grafana Explore (Prometheus)
+```promql
+container_memory_working_set_bytes{namespace="my-app-alpha", pod="my-app-alpha-12345"}
+  / kube_pod_container_resource_limits{namespace="my-app-alpha", pod="my-app-alpha-12345", resource="memory"}
 ```
 
 Common fixes:
@@ -107,7 +109,7 @@ If a Secret is missing, check:
 
 ## 6. The 2026-05-18 class of bugs (placeholder value)
 
-Seen on an alpha environment ([`postmortem_2026-05-18_alpha_placeholder_keys.md`](postmortem_2026-05-18_alpha_placeholder_keys.md)), and generalizable: a Helm values file shipped a literal placeholder (`<GENERATE_NEW_KEY_PAIR_FOR_X>`) as an env var. The app tried to Base64-decode it at startup, failed, and crashed.
+Seen on an alpha environment ([archived postmortem](archive/postmortem_2026-05-18_alpha_placeholder_keys.md)), and generalizable: a Helm values file shipped a literal placeholder (`<GENERATE_NEW_KEY_PAIR_FOR_X>`) as an env var. The app tried to Base64-decode it at startup, failed, and crashed.
 
 Detection signal in logs: `IllegalArgumentException: Illegal base64 character XX` where XX is a hex value (3c is `<`, 3e is `>`, 24 is `$`).
 
@@ -121,18 +123,17 @@ If you find one, audit the corresponding Helm values for unfilled placeholders b
 
 ## 7. The ArgoCD selfHeal cliff
 
-ArgoCD `selfHeal: true` will retry endlessly. If a sync fails for a structural reason (bad image, bad config), look at:
+For an alpha Application with `selfHeal: true`, inspect the operation when a structural
+problem prevents convergence:
 
 ```bash
 kubectl get application <app> -n argocd -o yaml | yq '.status.operationState.message'
 kubectl get application <app> -n argocd -o yaml | yq '.status.operationState.operation.sync.autoHealAttemptsCount'
 ```
 
-If `autoHealAttemptsCount > 100`, the auto-heal is clearly not converging. Consider:
-
-- Disabling auto-heal temporarily: `kubectl patch app <name> -n argocd --type=merge -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'`
-- Forcing a manual sync after fixing the underlying issue
-- Adding a retry limit (see vps/docs/observability.md, future work)
+Fix the underlying issue before syncing again. ApplicationSet can revert a direct patch to
+the generated Application; plan any temporary policy change at the ApplicationSet level
+and account for its effect on other applications.
 
 ## 8. Escalation
 

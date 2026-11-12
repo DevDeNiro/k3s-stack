@@ -1,8 +1,8 @@
 # Workstation Setup
 
-How to use `kubectl`, `k9s` and `helm` from a workstation (macOS, Linux, Windows) against
-the VPS. The Kubernetes API (6443) is closed by the VPS firewall: the workstation reaches
-it through an SSH tunnel.
+How to use `kubectl`, `k9s` and `helm` from macOS or Linux against the VPS. On Windows,
+use WSL and install the tools there. The Kubernetes API (6443) is closed by the VPS
+firewall: the workstation reaches it through an SSH tunnel.
 
 End state:
 - passwordless SSH to the VPS (`ssh k3s-vps`)
@@ -11,13 +11,9 @@ End state:
 
 ## Prerequisites
 
-| Tool | macOS | Windows |
-|------|-------|---------|
-| `ssh` / `ssh-keygen` | built-in | built-in (OpenSSH) |
-| `kubectl` | `brew install kubectl` | `winget install Kubernetes.kubectl` |
-| `k9s` | `brew install k9s` | `winget install Derailed.k9s` |
-| `helm` (optional) | `brew install helm` | `winget install Helm.Helm` |
-| `kubeseal` (to seal secrets) | `brew install kubeseal` | release binary |
+Install `ssh`, `ssh-keygen`, `kubectl`, `nc` and `sed` on the workstation (or inside
+WSL). Optional: `k9s`, `helm` and `kubeseal`. On macOS, these Kubernetes tools are
+available through Homebrew.
 
 ## Step 1: SSH key and passwordless access
 
@@ -27,7 +23,7 @@ ssh-keygen -t ed25519 -C "$USER-k3s-vps-$(date +%Y%m%d)" -f ~/.ssh/k3s_vps_ed255
 ssh-copy-id -i ~/.ssh/k3s_vps_ed25519.pub <user>@<vps-ip>
 ```
 
-On Windows, append the content of the `.pub` file to `~/.ssh/authorized_keys` on the VPS.
+If `ssh-copy-id` is unavailable, append the public key to `~/.ssh/authorized_keys` on the VPS.
 
 ## Step 2: SSH host alias with the tunnel
 
@@ -56,7 +52,8 @@ The script copies the VPS kubeconfig into `~/.kube/config-k3s-vps` (mode 0600), 
 context, cluster and user renamed `k3s-vps` and the server set to
 `https://127.0.0.1:16443`, then checks the access through a temporary tunnel. Options:
 `--port` (SSH port), `--local-port` (default 16443), `--context` (default `k3s-vps`),
-`--direct` (no tunnel, only with `harden-host.sh --allow-api-from <your-ip>/32`).
+`--direct` (no tunnel; requires `harden-host.sh --allow-api-from <your-ip>/32` and an
+API certificate covering the chosen hostname or IP).
 
 ```bash
 ssh -fN k3s-vps                        # tunnel in the background

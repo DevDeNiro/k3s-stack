@@ -2,7 +2,7 @@
 
 ## Séparation Alpha / Prod
 
-Chaque application onboardée via `onboard-app.sh` dispose de :
+Selon les options de `onboard-app.sh`, chaque environnement sélectionné dispose de :
 
 | Ressource       | Alpha         | Prod                     |
 |-----------------|---------------|--------------------------|
@@ -13,6 +13,9 @@ Chaque application onboardée via `onboard-app.sh` dispose de :
 | User PostgreSQL | `<app>-alpha` | `<app>-prod`             |
 | AppProject Argo CD | `<app>` (commun) | `<app>` (commun)   |
 | Backup auto     | ❌             | ✅ (daily/weekly/monthly, copie hors site optionnelle) |
+
+`--environment` sélectionne les environnements ; `--skip-database` désactive la base.
+L'onboarding ne crée pas les realms Keycloak.
 
 ### Cloisonnement entre applications
 
@@ -82,21 +85,24 @@ ImageUpdater CR → Lit annotations Application → Met à jour image.tag
 **Prod** : `newest-build` + filtre `regexp:^main-[a-f0-9]{40}$`
 
 Le tag retenu est écrit dans l'Application Argo CD (`write-back-method: argocd`), sans
-commit Git.
+commit Git. Alpha se synchronise automatiquement ; la production nécessite une
+synchronisation manuelle après vérification du tag et de la révision Git. Avant la
+sélection d'un tag immuable, l'Application utilise le tag initial `develop` ou `main`.
 
 ---
 
-## Secrets PostgreSQL (GitOps)
+## Secrets PostgreSQL
 
 ```
 onboard-app.sh
     ├─► Crée DB + user PostgreSQL
     ├─► Sauvegarde password → /root/.k3s-secrets/<app>.env
-    └─► Crée secret K8s temporaire
-
-SealedSecret (dans votre chart)
-    └─► ArgoCD déploie → Sealed Secrets déchiffre → Secret final
+    └─► Crée le Secret K8s <app>-db dans chaque namespace sélectionnée
 ```
+
+Le Secret PostgreSQL est créé directement par l'onboarding et n'a pas à être remplacé
+par un SealedSecret. Sauvegarder le mot de passe hors du serveur, sans le publier dans
+Git. Les autres secrets applicatifs peuvent être scellés séparément.
 
 **Configuration values.yaml** :
 
@@ -114,51 +120,10 @@ database:
 
 ## Migrations (ArgoCD PreSync)
 
-Les migrations s'exécutent **avant** le déploiement via un Job PreSync.
-
-### Avec common-library
-
-```yaml
-# Chart.yaml
-dependencies:
-    -   name: common-library
-        version: "2.1.0"
-        repository: "oci://ghcr.io/devdeniro"
-```
-
-```yaml
-# templates/migration-job.yaml
-{ { - include "common.migrationJob.springBoot" . } }
-```
-
-```yaml
-# values-prod.yaml
-migration:
-    enabled: true
-    type: liquibase
-    springProfile: migration  # Profil dédié sans web/security
-```
-
-### Profil Spring dédié (recommandé pour prod)
-
-```yaml
-# application-migration.yml
-spring:
-    main:
-        web-application-type: none
-        lazy-initialization: true
-    autoconfigure:
-        exclude:
-            - org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration
-            - org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration
-```
-
-### Vérification
-
-```bash
-kubectl get jobs -n <app>-alpha -l app.kubernetes.io/component=migration
-kubectl logs -n <app>-alpha job/<app>-migration-<revision>
-```
+Un Job PreSync facultatif s'exécute avant le déploiement. Ses Secrets doivent exister
+avant la phase Sync. La [bibliothèque Helm](../../charts/common-library/templates/_migration-job.tpl)
+fournit des modèles ; vérifier notamment la configuration TLS et la sortie du processus
+de migration pour le chart de l'application.
 
 ---
 
@@ -171,23 +136,9 @@ Une instance Keycloak, un realm par environnement :
 | Alpha | `<app>-alpha` | `https://auth.domain.com/realms/<app>-alpha` |
 | Prod  | `<app>-prod`  | `https://auth.domain.com/realms/<app>-prod`  |
 
-### Créer un realm (CLI)
-
-Le mot de passe administrateur transite par stdin (jamais en argument de `kubectl exec`,
-enregistré par le journal d'audit) :
-
-```bash
-kubectl get secret keycloak-secret -n security -o jsonpath='{.data.admin-password}' | base64 -d \
-  | kubectl exec -i -n security keycloak-0 -- sh -c '
-      IFS= read -r password
-      /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master \
-          --user admin --password "$password" --config /tmp/kcadm.config &&
-      /opt/keycloak/bin/kcadm.sh create realms -s realm="$1" -s enabled=true --config /tmp/kcadm.config
-      rm -f /tmp/kcadm.config' kcadm <app>-alpha
-```
-
-Le mot de passe initial ne sert qu'au premier démarrage : s'il a été changé dans la
-console, utiliser le mot de passe courant.
+Les realms se configurent séparément dans la console, accessible par tunnel :
+voir [`installation-onboarding.md`](installation-onboarding.md#7-configurer-lidentité-et-les-secrets-de-lapplication).
+Le mot de passe initial ne sert qu'au premier démarrage ; utiliser le mot de passe courant.
 
 Ce compte du realm `master` administre tous les realms : il reste à l'opérateur et ne
 va jamais dans une application. Une application qui gère les utilisateurs de son realm
@@ -218,8 +169,8 @@ adresses publiques : invitations, réinitialisations et vérifications d'email p
 un relais SMTP (Scaleway TEM, par exemple). Côté passerelle, la RateLimitPolicy
 `keycloak` limite les endpoints OIDC (`/realms`) par adresse cliente
 (`KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST`, réponse `429`) ; les assets de
-connexion (`/resources`) ne sont pas limités. La détection de force brute du realm
-protège les comptes en complément.
+connexion (`/resources`) ne sont pas limités. Activer et vérifier la détection de force
+brute dans chaque realm pour protéger les comptes en complément.
 
 ---
 
@@ -243,9 +194,11 @@ sudo ./vps/scripts/k3s-maintenance.sh upgrade   # sauvegarde, puis mineure suiva
 
 ### Versions des charts
 
-Épinglées dans `vps/config/versions.env`. Une montée de version se valide localement
-(`local/install.sh`) puis s'applique par réinstallation (voir
-[`security-hardening.md`](security-hardening.md)).
+Épinglées dans `vps/config/versions.env` pour les nouvelles installations. Avant toute
+mise à jour d'un cluster existant, vérifier les versions réellement installées,
+sauvegarder et tester la restauration et la mise à jour sur une copie isolée (voir
+[`observability.md`](observability.md#notes-for-vps-upgrades)). Une réinstallation
+supprime les données et sauvegardes locales.
 
 ### Backup PostgreSQL manuel
 

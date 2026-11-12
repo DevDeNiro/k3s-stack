@@ -29,7 +29,8 @@ config:
             # Default update strategy
             default: true
 
-        # GitLab Container Registry (optional - uncomment if using GitLab)
+        # GitLab Container Registry (optional). GitLab repository discovery also
+        # requires custom ApplicationSet generators; SCM_PROVIDER alone is not enough.
         # - name: gitlab
         #   api_url: https://registry.gitlab.com
         #   prefix: registry.gitlab.com

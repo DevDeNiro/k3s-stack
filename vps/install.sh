@@ -352,6 +352,7 @@ print_summary() {
     echo -e "  4. Gateway, certificates and Keycloak routes:"
     echo -e "     ${BLUE}sudo ./vps/scripts/setup-gateway-api.sh${NC}"
     echo -e "  5. Repository and registry access for every organization ($(scm_organizations)):"
+    echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh set-registry-credentials${NC}"
     echo -e "     ${BLUE}sudo ./vps/scripts/export-secrets.sh set-scm-credentials ${SCM_PROVIDER}${NC}"
     echo -e "  6. Applications:"
     echo -e "     ${BLUE}sudo ./vps/scripts/onboard-app.sh <app-name> [--organization <org>]${NC}"

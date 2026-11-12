@@ -1,5 +1,7 @@
 # Postmortem: ArgoCD Sync & Deployment Stagnation (2026-02-14)
 
+> Historical incident record. Its deployment recommendations describe the platform at the time, not the current GitOps configuration.
+
 ## Incident Summary
 
 **Date:** 2026-02-14  

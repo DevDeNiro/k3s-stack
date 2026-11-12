@@ -1,606 +1,73 @@
 # K3s Stack Deployment Flow
 
-This document describes the complete deployment flow for applications on the K3s stack, from initial cluster setup to
-running applications with ArgoCD GitOps.
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              VPS (K3s Cluster)                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
-│  │  ArgoCD     │    │  Keycloak   │    │ PostgreSQL  │    │  Gateway    │  │
-│  │  (GitOps)   │    │  (Auth)     │    │  (Storage)  │    │  (NGF)      │  │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘    └──────┬──────┘  │
-│         │                  │                  │                  │         │
-│         │    ┌─────────────┴──────────────────┴─────────────┐    │         │
-│         │    │           Application Namespaces             │    │         │
-│         │    │  ┌─────────────────┐  ┌─────────────────┐    │    │         │
-│         └────┼─▶│  app-alpha      │  │  app-prod       │◀───┼────┘         │
-│              │  │  (develop)      │  │  (main)         │    │              │
-│              │  └─────────────────┘  └─────────────────┘    │              │
-│              └──────────────────────────────────────────────┘              │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      ▲
-                                      │ HTTPS (Let's Encrypt)
-                                      │
-                              ┌───────┴───────┐
-                              │   Internet    │
-                              └───────────────┘
-```
-
-## Deployment Phases
-
-### Phase 1: Cluster Installation
-
-**Script:** `vps/install.sh`
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    install.sh Execution Flow                     │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │   Install K3s        │
-                   │   (with metrics-     │
-                   │    server enabled)   │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │   Install Helm       │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Deploy Core Stack:  │
-                   │  - Sealed Secrets    │
-                   │  - PostgreSQL        │
-                   │  - Keycloak          │
-                   │  - ArgoCD            │
-                   │  - Monitoring        │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Generate & Store    │
-                   │  Credentials in      │
-                   │  /root/.k3s-secrets  │
-                   └──────────────────────┘
-```
-
-**Key files:**
-
-- `vps/install.sh` - Main installation script (also installs cert-manager and the Let's Encrypt ClusterIssuers)
-- `vps/config/versions.env` - Pinned versions
-- `vps/config/k3s/config.yaml` - K3s flags (secrets encryption, audit log)
-- `vps/values/*.yaml` - Helm values (Argo CD, PostgreSQL, NGINX Gateway Fabric, monitoring)
-- `vps/templates/keycloak/` - Keycloak, with the theme and provider images of `KEYCLOAK_EXTENSION_IMAGES`
-  (`vps/scripts/apply-keycloak.sh`)
-- `vps/postgres-backup/` - backup CronJobs and optional off-site restic copy (`vps/scripts/apply-backups.sh`)
-
-### Phase 2: Gateway & TLS Setup
-
-**Script:** `vps/scripts/setup-gateway-api.sh [--staging] [--no-tls] [--dry-run]`
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│               setup-gateway-api.sh Execution Flow                │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ Gateway: HTTP + one  │
-                   │ HTTPS listener per   │
-                   │ GATEWAY_HOSTNAMES    │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ One Certificate per  │
-                   │ hostname (removed    │
-                   │ hostnames pruned)    │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ HTTP -> HTTPS        │
-                   │ redirection          │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ Keycloak routes on   │
-                   │ AUTH_HOSTNAMES and   │
-                   │ their rate limit     │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ CoreDNS hairpin:     │
-                   │ pods resolve public  │
-                   │ hostnames internally │
-                   └──────────────────────┘
-```
-
-**Security notes:**
-
-- Grafana, Prometheus, Alertmanager, Argo CD: `kubectl port-forward` only
-- Keycloak: only `/realms/*` (OAuth/OIDC endpoints, HTTPRoute `keycloak`) and `/resources/*`
-  (login assets, HTTPRoute `keycloak-resources`) are routed; the master realm is answered by
-  the gateway, `/admin/*` is not routed
-- The RateLimitPolicy `keycloak` limits the OIDC endpoints per client address
-  (`KEYCLOAK_RATE_LIMIT_RATE`, `KEYCLOAK_RATE_LIMIT_BURST`, `429` above the burst); the login
-  assets are not limited
-- The gateway access logs carry the path without the query string (OAuth codes and states
-  never logged); Alloy masks the tokens of `/stop/<token>` paths before Loki
-- Applications attach their own HTTPRoutes to `infrastructure-gateway` (namespace
-  `nginx-gateway`). Each hostname is declared in `GATEWAY_HOSTNAMES` with the namespace
-  allowed to route it (`<hostname>=<namespace>`): its HTTPS listener refuses the routes of
-  every other namespace (`NotAllowedByListeners`), so an application cannot take over a
-  hostname or a path of another one. The HTTP listener only serves the redirection and the
-  ACME challenges.
-
-### Phase 3: Image Pull and Repository Credentials (GitHub/GitLab)
-
-**Scripts:** `vps/scripts/export-secrets.sh set-registry-credentials`, then
-`vps/scripts/export-secrets.sh set-scm-credentials <provider>`
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│         set-registry-credentials, set-scm-credentials            │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Read-only image     │
-                   │  pull token:         │
-                   │  - argocd/ghcr-      │
-                   │    registry-secret   │
-                   │  - security/ghcr-    │
-                   │    secret            │
-                   │  - ghcr-secret of    │
-                   │    every application │
-                   │    namespace         │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Repository token,   │
-                   │  argocd only:        │
-                   │  - github-repo-creds │
-                   │    (repo-creds)      │
-                   │  - scm-token         │
-                   └──────────────────────┘
-```
-
-**Important:** two tokens with two blast radii. The **image pull token** reaches every application
-namespace, where any chart of the application can read it: on GitHub, a classic personal access
-token with the single scope `read:packages` (GHCR only accepts classic tokens). The Image Updater
-reads GHCR and Keycloak pulls private extension images with it. The **repository token** never
-leaves the namespace `argocd`: Argo CD discovers and pulls the private repositories of every
-organization of `SCM_ORGANIZATIONS` with it (on GitHub, a classic token with the scope `repo`,
-ideally of a machine account that is a read-only member of the organizations; a fine-grained token
-is limited to one owner). The credential template matches repository URLs by prefix:
-`https://github.com/<org>` for one organization, `https://github.com/` for several.
-
-### Phase 4: Application Onboarding
-
-**Script:** `vps/scripts/onboard-app.sh <app-name> [--environment all|alpha|prod] [--organization ORG] [--skip-database]`
-
-`--organization` names the organization of the repository, one of `SCM_ORGANIZATIONS` (default: the first one):
-it sets the URL of the Argo CD repository Secret (`https://github.com/<org>/<app>.git`).
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                  onboard-app.sh Execution Flow                   │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ Create selected ns:  │
-                   │  - <app>-alpha and/or│
-                   │  - <app>-prod        │
-                   │  (ResourceQuota,     │
-                   │   LimitRange, Pod    │
-                   │   Security restricted│
-                   │   default Network-   │
-                   │   Policy)            │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Create PostgreSQL   │
-                   │ databases & users    │
-                   │ for selected env(s)  │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Create Secrets in   │
-                   │  each namespace:     │
-                   │  - <app>-db (DB creds)│
-                   │  - ghcr-secret       │
-                   │    (read-only pull)  │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Argo CD repository  │
-                   │  Secret, then, last, │
-                   │  AppProject <app>    │
-                   └──────────────────────┘
-```
-
-**Outputs:**
-
-- Database credentials in `/root/.k3s-secrets/<app>.env`; each database is closed to the other roles
-- Secrets created directly in namespaces (not SealedSecrets); the URLs of `<app>-db` require TLS
-- AppProject `<app>` in `argocd` (its repository, its two namespaces, no cluster-scoped resource): the
-  ApplicationSets deploy the application within 3 minutes. Without onboarding, Argo CD deploys nothing.
-
-For a production-only onboarding of a repository of the organization `other-org`:
-
-```bash
-sudo ./vps/scripts/onboard-app.sh my-app --environment prod --organization other-org
-```
-
-The script preserves a known PostgreSQL password and refuses to rotate an existing account when its password is
-unavailable or inconsistent. Do not rerun the broad `all` scope for a single-environment repair.
-
-### Phase 5: Sealed Secrets Generation (Developer Machine)
-
-**Location:** Developer's local machine
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│              Sealed Secrets Generation Flow                      │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Export public cert  │
-                   │  from VPS:           │
-                   │  export-secrets.sh   │
-                   │  export-cert /tmp/   │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Copy cert to local  │
-                   │  machine via scp     │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Create SealedSecret │
-                   │  using kubeseal:     │
-                   │  - PostgreSQL password│
-                   │  - keycloak client   │
-                   │  - application keys  │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Commit encrypted    │
-                   │  SealedSecrets to    │
-                   │  Git repository      │
-                   └──────────────────────┘
-```
-
-**Note:** `ghcr-secret` is NOT a SealedSecret - it's created by `onboard-app.sh` to avoid chicken-and-egg issues with
-PreSync hooks.
-
-Seal each production value from the application repository, typed without echo and never passed as a command
-argument (`kubeseal --raw` prints only the encrypted value, bound to the namespace and Secret name):
-
-```bash
-read -r -s -p "Value: " VALUE; echo
-printf '%s' "$VALUE" | kubeseal --raw --cert ~/.k3s-secrets/sealed-secrets-pub.pem \
-    --namespace my-app-prod --name my-app-secrets --from-file=/dev/stdin
-unset VALUE
-```
-
-Copy the encrypted values into `helm/<app>/values-prod.yaml`. Never put raw application keys in Git or chat.
-If onboarding created a new database password, seal that exact password the same way and update the
-corresponding `encryptedData` value before allowing Argo CD to sync.
-
-### Phase 6: ArgoCD Application Deployment
-
-**Trigger:** Git push starts the application build; Argo CD Image Updater polls GHCR for the branch-qualified immutable
-image tag, and ArgoCD automated sync deploys the updated tag. Image Updater polls the registry; it is not a build
-webhook.
-
-The configured tags are `develop-<full-sha>` for Alpha and `main-<full-sha>` for production; this prevents one branch's
-build from being selected into the other environment.
-
-The ApplicationSets hold one SCM provider generator per organization of `SCM_ORGANIZATIONS`. Each generator carries
-the image path of its organization (`values.imageBase`: `REGISTRY_HOST/<organization, lowercased>`, or `REGISTRY_BASE`
-for a single organization), used by the Image Updater annotation and the `image.repository` parameter:
-`ghcr.io/<organization>/<repository>`. GHCR paths are lowercase; repository names must be lowercase and unique across
-the organizations (they name the Applications and the namespaces).
-
-- **Prod**: every repository whose default branch holds `helm/` gets `<repository>-prod`, following `main`.
-- **Alpha**: only the repositories having a `develop` branch that holds `helm/` get `<repository>-alpha` (generator
-  listing every branch, filter `branchMatch: ^develop$` combined with `pathsExist: [helm]`, checked on that branch).
-  When a repository loses its `develop` branch, the ApplicationSet deletes its alpha Application and resources.
-
-After changing the ApplicationSet templates (`vps/templates/argocd/`) or `SCM_ORGANIZATIONS` / `REGISTRY_HOST` /
-`REGISTRY_BASE`, render and apply them again:
-
-```bash
-sudo ./vps/scripts/apply-config.sh
-```
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                  ArgoCD Sync Flow                                │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┴─────────────────────┐
-        │                                           │
-        ▼                                           ▼
-┌───────────────┐                         ┌───────────────┐
-│ ApplicationSet│                         │ ApplicationSet│
-│ (alpha)       │                         │ (prod)        │
-│ branch:develop│                         │ branch:main   │
-└───────┬───────┘                         └───────┬───────┘
-        │                                         │
-        ▼                                         ▼
-┌───────────────────────────────────────────────────────────────┐
-│                     ArgoCD Sync Phases                        │
-├───────────────────────────────────────────────────────────────┤
-│                                                               │
-│  1. PreSync (if migration.enabled: true)                      │
-│     ┌─────────────────────────────────────────────────────┐   │
-│     │  Migration Job                                      │   │
-│     │  - Uses: ghcr-secret (created by onboard-app.sh)    │   │
-│     │  - Uses: default ServiceAccount                     │   │
-│     │  - Runs: Liquibase migrations                       │   │
-│     │  - Hook: argocd.argoproj.io/hook: PreSync           │   │
-│     └─────────────────────────────────────────────────────┘   │
-│                           │                                   │
-│                           ▼ (on success)                      │
-│  2. Sync                                                      │
-│     ┌─────────────────────────────────────────────────────┐   │
-│     │  Deploy Resources:                                  │   │
-│     │  - SealedSecrets → Secrets (by controller)          │   │
-│     │  - ServiceAccount                                   │   │
-│     │  - Deployment                                       │   │
-│     │  - Service                                          │   │
-│     │  - HTTPRoute                                        │   │
-│     │  - NetworkPolicy                                    │   │
-│     │  - HPA (if enabled)                                 │   │
-│     └─────────────────────────────────────────────────────┘   │
-│                                                               │
-│  3. PostSync (optional, not currently used)                   │
-│                                                               │
-└───────────────────────────────────────────────────────────────┘
-```
-
-### Phase 7: Application Startup
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                  Application Startup Flow                        │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Pod Scheduled       │
-                   │  - Pull image from   │
-                   │    GHCR (ghcr-secret)│
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Spring Boot Starts  │
-                   │  - Reads env vars    │
-                   │    from Deployment   │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  OIDC Discovery      │
-                   │  (INTERNAL URL)      │
-                   │  ┌────────────────┐  │
-                   │  │ keycloak.      │  │
-                   │  │ security.svc.  │  │
-                   │  │ cluster.local  │  │
-                   │  │ /realms/<realm>│  │
-                   │  └────────────────┘  │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Liquibase Migrations│
-                   │  (if PreSync disabled│
-                   │   or first run)      │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │  Health Checks Pass  │
-                   │  - /actuator/health/ │
-                   │    liveness          │
-                   │  - /actuator/health/ │
-                   │    readiness         │
-                   └──────────────────────┘
-```
-
-## Important Pitfalls & Solutions
-
-### 1. OIDC Discovery TLS Error
-
-**Problem:** Spring Boot fails to validate Let's Encrypt certificate when calling Keycloak externally.
-
-**Solution:** Use internal URL for OIDC discovery:
-
-```yaml
-# deployment.yaml
--   name: OAUTH2_ISSUER_URI
-    value: "{{ .Values.keycloak.internalUrl }}/realms/{{ .Values.keycloak.realm }}"
-```
-
-The `internalUrl` (`http://keycloak.security.svc.cluster.local`) bypasses TLS.
-
-### 2. PreSync Hook Chicken-and-Egg
-
-**Problem:** Migration job needs `ghcr-secret` and `ServiceAccount`, but these are created in Sync phase (after
-PreSync).
-
-**Solutions:**
-
-- `ghcr-secret`: Created by `onboard-app.sh`, not via SealedSecret
-- `ServiceAccount`: Migration job uses `default` SA
-- Alternative: Disable PreSync migration (`migration.enabled: false`) and run Liquibase at app startup
-
-### 3. ArgoCD Repo Credentials
-
-**Problem:** ArgoCD can't access private GitHub repos.
-
-**Solution:** create the labeled credentials (the token is read without echo and never
-passed as a command argument):
-
-```bash
-sudo ./vps/scripts/export-secrets.sh set-scm-credentials github
-```
-
-### 4. Sealed Secrets Scope
-
-**Problem:** SealedSecrets are namespace-scoped by default.
-
-**Solution:** Use `namespace-wide` annotation:
-
-```yaml
-metadata:
-    annotations:
-        sealedsecrets.bitnami.com/namespace-wide: "true"
-```
-
-Seal with the same scope: `kubeseal --raw --scope namespace-wide --namespace <app>-<env> ...` (no `--name`).
-
-### 5. SealedSecret Not Decrypted
-
-**Problem:** `no key could decrypt secret (<key>)`: one value was sealed with another certificate (the local k3d
-cluster, for example). The whole SealedSecret is rejected, Argo CD reports the application `Degraded`, and a pod
-referencing the Secret without `optional: true` stays in `CreateContainerConfigError`.
-
-**Solution:** seal every value with the certificate of the VPS (`export-secrets.sh export-cert`).
-
-### 6. Application NetworkPolicy
-
-**Problem:** `Connection refused` towards a platform service, although the platform policies allow the application
-namespaces: the NetworkPolicy of the application chart restricts its own egress.
-
-**Solution:** allow egress to every platform service the application uses: `storage` 5432 (PostgreSQL),
-`security` 8080 (Keycloak: NetworkPolicies match the pod port, not the port 80 of its Service) and DNS, plus the
-pods of its own namespace it calls (its Redis, for example: caches belong to the application chart). An
-application sending emails also needs 587 (or 465) towards its SMTP relay. Inbound, the default policy of the
-onboarding only lets in the namespace itself, the gateway and Prometheus: another application reaches it only if
-its chart allows that namespace explicitly.
-
-### 7. Rolling Update Refused by the Quota
-
-**Problem:** `exceeded quota: <app>-<env>-quota, requested: limits.cpu=...`: during a rolling update the old and the
-new pod run together.
-
-**Solution:** the namespace quota limits (`vps/config/onboarding/<env>.env`) must hold twice the largest pod: lower
-the pod limits, or raise the quota and run `onboard-app.sh <app>` again.
-
-### 8. Sync Refused by the AppProject
-
-**Problem:** `... is not permitted in project <app>`: the chart holds a cluster-scoped resource (Namespace,
-ClusterRole, CRD...), a `ResourceQuota`, `LimitRange`, `Endpoints` or `EndpointSlice`, or a resource of another
-namespace.
-
-**Solution:** remove it from the chart. Namespaces, quotas and RBAC beyond the namespace belong to the platform
-(`onboard-app.sh`).
-
-### 9. HTTPRoute Refused by the Gateway
-
-**Problem:** the route status reports `NotAllowedByListeners`.
-
-**Solution:** declare the namespace of the route for its hostname in `GATEWAY_HOSTNAMES`
-(`<hostname>=<app>-<env>`), then run `setup-gateway-api.sh`.
-
-## File Reference
-
-### VPS Scripts (`vps/scripts/`)
-
-| Script                 | Purpose                                         |
-|------------------------|-------------------------------------------------|
-| `install.sh`           | Initial cluster setup (in `vps/`)               |
-| `setup-gateway-api.sh` | Gateway, certificates, Keycloak routes and rate limit, hairpin |
-| `apply-config.sh`      | Argo CD ApplicationSets, Image Updater CRs, emptied `default` project |
-| `apply-keycloak.sh`    | Keycloak and its extension images (themes, providers) |
-| `apply-backups.sh`     | PostgreSQL backup CronJobs, off-site restic copy |
-| `onboard-app.sh`       | Per-application setup, AppProject included      |
-| `export-secrets.sh`    | Credentials, sealing key backup, repository and image pull access |
-| `setup-secrets.sh`     | Infrastructure secrets, rotation, Discord, off-site backup credentials |
-| `harden-host.sh`       | Firewall, SSH and automatic updates             |
-| `k3s-maintenance.sh`   | K3s backups, restores and upgrades              |
-| `setup-remote.sh`      | Workstation kubeconfig through an SSH tunnel    |
-
-Parameters of every script: [`../README.md`](../README.md).
-
-### Example applications
-
-- [DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit): client application (React / Vite
-  build served by nginx), without database (`onboard-app.sh <app> --skip-database`).
-- A server-side application (Spring Boot, for example) follows the same layout, with its database onboarded,
-  Keycloak reached through its realm, and its cache, if any, in its own chart.
-
-The auto-discovery deploys a repository of one of the organizations of `SCM_ORGANIZATIONS` once it follows the layout
-below: a chart in `helm/<repository>/` with `values-prod.yaml` (and `values-alpha.yaml` with a `develop` branch), a
-`main` branch, images `ghcr.io/<organization>/<repository>` tagged `main-<sha>` (and `develop-<sha>`).
-
-### Application Helm Chart (`helm/<app>/`)
-
-| File                                   | Purpose                             |
-|----------------------------------------|-------------------------------------|
-| `values.yaml`                          | Default configuration               |
-| `values-alpha.yaml`                    | Alpha environment overrides         |
-| `values-prod.yaml`                     | Production environment overrides    |
-| `templates/deployment.yaml`            | Pod specification with env vars     |
-| `templates/sealed-secrets.yaml`        | Encrypted secrets (not ghcr-secret) |
-| `templates/migration-job-presync.yaml` | Database migrations (optional)      |
-
-### Argo CD Configuration
-
-| File                                          | Purpose                         |
-|-----------------------------------------------|---------------------------------|
-| `vps/values/argocd.yaml`                      | Argo CD Helm values             |
-| `vps/templates/argocd/applicationsets.yaml.tpl` | Dynamic app generation from Git |
-| `vps/templates/argocd/generator-{alpha,prod}.yaml.tpl` | One SCM generator per organization |
-| `vps/templates/onboarding/appproject.yaml.tpl` | AppProject of an application (`onboard-app.sh`) |
-| `vps/manifests/argocd-default-project.yaml`   | Emptied `default` project       |
-| `vps/manifests/argocd-image-updaters.yaml`    | Image Updater CRs (alpha, prod) |
-
-## Quick Reference Commands
-
-```bash
-# Check ArgoCD sync status
-sudo kubectl get applications -n argocd
-
-# View app logs
-sudo kubectl logs -f -n <app>-alpha deploy/<app>-alpha
-
-# Force ArgoCD refresh
-sudo kubectl -n argocd patch application <app>-alpha \
-    --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
-
-# Reset stuck ArgoCD operation
-sudo kubectl -n argocd patch application <app>-alpha \
-    --type json -p '[{"op":"remove","path":"/status/operationState"}]'
-
-# View sealed-secrets controller logs
-sudo kubectl logs -n kube-system -l app.kubernetes.io/name=sealed-secrets
-
-# Export credentials
-sudo ./vps/scripts/export-secrets.sh show <service>
-```
+For the installation and onboarding commands, see [installation-onboarding.md](installation-onboarding.md).
+Script parameters are documented in [the VPS reference](../README.md).
+
+## Repository and discovery
+
+- Discovery currently targets GitHub organizations listed in `SCM_ORGANIZATIONS`.
+- Each repository needs a unique lowercase name, `helm/<repository>/values.yaml` and
+  `values-prod.yaml`; alpha also needs `values-alpha.yaml` on `develop`.
+- The production generator checks for `helm/` on the default branch and follows `main`.
+  The alpha generator checks `helm/` on `develop`.
+- `onboard-app.sh` creates the namespaces and AppProject before Argo CD can deploy.
+  The project permits only the application's repository and namespaces; cluster-scoped
+  resources, `ResourceQuota`, `LimitRange`, `Endpoints` and `EndpointSlice` are refused.
+- The templates poll every 180 seconds once applied. Losing the `develop` branch removes
+  its alpha Application and resources. If a repository leaves production discovery, its
+  Application is deleted but the deployed resources are preserved.
+
+## Images and synchronization
+
+| Environment | Branch | Image Updater filter | Sync |
+|-------------|--------|----------------------|------|
+| Alpha | `develop` | `develop-<40-character SHA>` | automatic, with self-heal and prune |
+| Production | `main` | `main-<40-character SHA>` | manual |
+
+Image Updater polls the registry, selects the newest matching build and writes `image.tag`
+into the Application, not Git. It can select an image before the first workload starts.
+Initially the Application uses the mutable `develop` or `main` tag; alpha can sync before
+an immutable tag is selected. **Before syncing production, verify that the selected tag
+matches the Git revision being deployed.** These behaviors require the current templates
+to be applied; repository changes alone do not update a running cluster.
+
+Each organization uses `REGISTRY_HOST/<organization>/<repository>` (lowercase), or
+`REGISTRY_BASE/<repository>` for a single organization. A read-only image token is copied
+into application namespaces as `ghcr-secret`; the repository token stays in `argocd`.
+
+## Secrets and migrations
+
+- Onboarding creates `<app>-db` directly and saves its password in
+  `/root/.k3s-secrets/<app>.env`. Back it up securely; do not duplicate it as a
+  SealedSecret. Application secrets are sealed with the destination cluster's public
+  certificate and committed encrypted.
+- Sealed Secrets default to **strict** scope: the name and namespace must match. For
+  `namespace-wide` Secrets, use `--scope namespace-wide` with the target namespace.
+- An optional PreSync migration needs its image pull secret and database secret before
+  Sync. The common-library migration job uses the default ServiceAccount unless
+  configured otherwise. Application-specific secrets created during Sync are unavailable
+  to a first PreSync hook.
+- For Keycloak, the expected issuer must match the token's `iss`, normally the public
+  realm URL. CoreDNS routes configured public hostnames internally; use separate internal
+  endpoints only if the application supports them.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---------|-------|
+| No Application | Onboarding AppProject, GitHub token, organization, `helm/` and branch; inspect the ApplicationSet controller logs. |
+| Project not found | Onboard the application; if the project exists, refresh the relevant ApplicationSet. |
+| ImagePullBackOff | Image path and tag, then `ghcr-secret` in the application namespace. |
+| `no key could decrypt secret` | Seal again with the target cluster certificate and correct scope. |
+| Resource not permitted | Remove forbidden or cluster-scoped resources from the application chart. |
+| Route not attached | Declare `hostname=namespace` in `GATEWAY_HOSTNAMES` and apply the gateway configuration. |
+| Connection refused to PostgreSQL or Keycloak | Check the application's egress policy, namespace label, ports and DNS. |
+| Rolling update exceeds quota | Size quota for both old and new pods, then apply onboarding settings to the intended environment. |
+
+For logs and diagnostic commands, see [commands-cheatsheet.md](commands-cheatsheet.md).
+
+## Example applications
+
+[DevDeNiro/react-starter-kit](https://github.com/DevDeNiro/react-starter-kit) is a static
+client with no database (`onboard-app.sh <app> --skip-database`). Server applications use
+the same chart layout and may add their own database, Keycloak realm and cache.

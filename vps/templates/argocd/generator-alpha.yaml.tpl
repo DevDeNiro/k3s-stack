@@ -4,6 +4,8 @@
         # on that branch. No glob patterns in pathsExist: the chart path is derived
         # from the repository name.
         -   scmProvider:
+                # SCM providers default to 30 minutes, unlike Git generators (3 minutes).
+                requeueAfterSeconds: 180
                 github:
                     organization: ${ORGANIZATION}
                     tokenRef:
